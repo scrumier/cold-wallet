@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "wallet-core",
+    "wallet-sim",
+]
+resolver = "3"
+
+[workspace.dependencies]
+embedded-graphics = "0.8.1"
