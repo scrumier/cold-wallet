@@ -18,7 +18,7 @@ fn main()
 	
 	let mut tick_counter = 0;
 	let mut animation_number = 0;
-	let mut update = false;
+	let mut need_update = false;
 	
 	display.clear(Rgb565::BLACK)?;
 	
@@ -31,7 +31,7 @@ fn main()
 	// Window loop
 	'running: loop {
 		window.update(&display);
-		if update == true {
+		if need_update == true {
 			draw_ui(&mut display, wallet.state, animation_number)?;
 			animation_number += 1;
 		}
@@ -42,7 +42,7 @@ fn main()
 		std::thread::sleep(std::time::Duration::from_millis(1000));
 		
 		if tick_counter % 100 == 1 {
-			update = true;
+			need_update = true;
 		}
 		tick_counter += 1;
 	}
