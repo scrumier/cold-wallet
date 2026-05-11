@@ -2,8 +2,7 @@
 
 ## ⚠️ Disclaimer ⚠️
 
-**Do not trust this code blindly.  
-Review, audit, and verify everything yourself before using it with real funds.**
+**Do not trust this.**
 
 This project is for **educational and experimental purposes only**.
 
