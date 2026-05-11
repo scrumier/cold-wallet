@@ -1,79 +1,34 @@
-# Homemade Cold Wallet
+# cold-wallet
 
-## ⚠️ Disclaimer ⚠️
+An air-gapped cryptocurrency wallet written in Rust.
 
-**Do not trust this.**
+## What it does
 
-This project is for **educational and experimental purposes only**.
+This wallet is designed to sign transactions on a device that never connects to the internet. No Wi-Fi. No Bluetooth. No USB. The only communication channel is QR codes.
 
----
+The workflow:
+1. Build an unsigned transaction on an online device, export it as a QR code
+2. Scan the QR code on the offline device running this wallet
+3. The wallet signs the transaction with the private key
+4. The signed transaction is displayed as a QR code
+5. Scan it back on the online device and broadcast it to the network
 
-## Description
+The private key never touches a connected device.
 
-This project is a **homemade cold wallet** designed with maximum isolation in mind.
+## Why
 
-### Security Principles
+Hardware wallets exist, but they are black boxes. This project is an attempt to understand what air-gapped signing actually requires — key generation, transaction parsing, cryptographic signing — by building it from scratch.
 
-- ❌ No Wi-Fi
-- ❌ No Bluetooth
-- ❌ No USB connection
-- ✅ Fully air-gapped
+## Status
 
-The wallet operates **entirely offline** and relies on **QR codes** to interact with the outside world.
+Experimental and educational. Not audited. Not recommended for storing real funds.
 
-### How it works
+## Stack
 
-- The device **generates QR codes** containing unsigned or signed transaction data
-- It can **scan QR codes** to receive transaction information
-- Transactions are **validated and signed offline**
-- No direct electronic communication with any external device
+- Rust
+- QR code encoding/decoding
+- Standard cryptographic primitives
 
-This drastically reduces the attack surface compared to traditional hardware wallets.
+## Author
 
----
-
-## Commit Message Convention
-
-This project follows a **conventional commit format** to keep the history clean and readable.
-
-### Format
-
-```
-
-<type>(<scope>):<emoji> <subjet>
-
-```
-
-### Commit Convention
-
-| Type     | Emoji | Description                                         | SemVer Impact |
-|----------|-------|-----------------------------------------------------|---------------|
-| Feat     | ✨     | New feature                                         | MINOR         |
-| Fix      | 🐛    | Bug fix                                             | PATCH         |
-| Docs     | 📚    | Documentation only changes                          | –             |
-| Style    | 💎    | Formatting changes (spaces, commas, etc.)           | –             |
-| Refactor | ♻️    | Code change without bug fix or new feature          | –             |
-| Perf     | 🚀    | Performance improvement                             | –             |
-| Test     | 🚨    | Adding or fixing tests                              | –             |
-| Build    | 🛠️   | Build system or external dependency changes         | –             |
-| Ci       | ⚙️    | CI configuration changes (GitHub Actions, etc.)     | –             |
-| Chore    | 🔧    | Maintenance tasks (version bumps, cleanup, tooling) | –             |
-
----
-
-## 🛑 Warning
-
-This project **does not guarantee security**.
-
-If you plan to use a cold wallet for real assets:
-
-- Review the code carefully
-- Understand the cryptography involved
-- Perform your own threat modeling
-- Prefer audited and battle-tested solutions for serious use
-
----
-
-## License
-
-Feel free to take my code
+Sonam — [github.com/scrumier](https://github.com/scrumier)
