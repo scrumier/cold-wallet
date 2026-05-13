@@ -10,11 +10,19 @@ use wallet_core::{draw_ui, AppState, ColdWallet, WalletEvent};
 const SCREEN_WIDTH: u32  = 800;
 const SCREEN_HEIGHT: u32 = 480;
 
-fn entropy() -> u32 {
-    SystemTime::now()
+fn entropy() -> [u8; 32] {
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0xDEAD_BEEF)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xDEAD_BEEF_DEAD_BEEF);
+    let mut buf = [0u8; 32];
+    let mut s = nanos;
+    for chunk in buf.chunks_mut(8) {
+        s = s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        let bytes = s.to_le_bytes();
+        chunk.copy_from_slice(&bytes[..chunk.len()]);
+    }
+    buf
 }
 
 fn log_transition(before: AppState, after: AppState) {
@@ -24,15 +32,12 @@ fn log_transition(before: AppState, after: AppState) {
             let typed = core::str::from_utf8(&buf[..len as usize]).unwrap_or("?");
             println!("[WALLET] passphrase: \"{typed}\"");
         }
-        (SetPin { len: before_len, .. }, SetPin { len: after_len, .. }) => {
-            println!("[WALLET] SetPin: {after_len}/6 digits entered (was {before_len})");
-        }
-        (ConfirmPin { len: before_len, .. }, ConfirmPin { len: after_len, .. }) => {
-            println!("[WALLET] ConfirmPin: {after_len}/6 digits entered (was {before_len})");
-        }
-        (EnterPin { len: before_len, .. }, EnterPin { len: after_len, .. }) => {
-            println!("[WALLET] EnterPin: {after_len}/6 digits entered (was {before_len})");
-        }
+        (SetPin { len: bl, .. }, SetPin { len: al, .. }) =>
+            println!("[WALLET] SetPin: {al}/6 digits (was {bl})"),
+        (ConfirmPin { len: bl, .. }, ConfirmPin { len: al, .. }) =>
+            println!("[WALLET] ConfirmPin: {al}/6 digits (was {bl})"),
+        (EnterPin { len: bl, .. }, EnterPin { len: al, .. }) =>
+            println!("[WALLET] EnterPin: {al}/6 digits (was {bl})"),
         _ => println!("[WALLET] {} → {}", state_name(before), state_name(after)),
     }
 }
@@ -74,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_settings = OutputSettingsBuilder::new().scale(1).build();
     let mut window = Window::new("Cold Wallet — Simulator", &output_settings);
 
-    draw_ui(&mut display, wallet.get_state())?;
+    draw_ui(&mut display, &wallet)?;
 
     'running: loop {
         window.update(&display);
@@ -84,11 +89,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 SimulatorEvent::Quit => break 'running,
                 SimulatorEvent::MouseButtonUp { mouse_btn: MouseButton::Left, point } => {
                     let before = wallet.get_state();
-                    wallet.handle_event(WalletEvent::Touch { x: point.x, y: point.y, entropy: entropy() });
+                    wallet.handle_event(WalletEvent::Touch {
+                        x: point.x, y: point.y, entropy: entropy(),
+                    });
                     let after = wallet.get_state();
                     if before != after {
                         log_transition(before, after);
-                        draw_ui(&mut display, after)?;
+                        draw_ui(&mut display, &wallet)?;
                     }
                 }
                 _ => {}

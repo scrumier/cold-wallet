@@ -20,7 +20,7 @@ use embedded_graphics::text::{Alignment::Center, Text};
 
 use crate::state::AppState;
 
-pub fn draw_ui<D>(display: &mut D, state: AppState) -> Result<(), D::Error>
+pub fn draw_ui<D>(display: &mut D, state: AppState, words: &[&'static str; 24]) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -28,7 +28,7 @@ where
 
     match state {
         AppState::Welcome                          => welcome::draw(display)?,
-        AppState::NewWallet { page }               => mnemonic::draw(display, page)?,
+        AppState::NewWallet { page }               => mnemonic::draw(display, page, words)?,
         AppState::EnterPassphrase { buf, len }     => passphrase::draw(display, &buf, len)?,
         AppState::SetPin { order, len, .. }        => pin::draw(display, &order, len, false)?,
         AppState::ConfirmPin { order, len, .. }    => pin::draw(display, &order, len, true)?,
@@ -38,7 +38,7 @@ where
         AppState::Receive                          => receive::draw(display)?,
         AppState::Accounts                         => accounts::draw(display)?,
         AppState::Settings                         => settings::draw(display)?,
-        AppState::ShowMnemonic { page }            => mnemonic::draw(display, page)?,
+        AppState::ShowMnemonic { page }            => mnemonic::draw(display, page, words)?,
         AppState::About                            => about::draw(display)?,
         AppState::SignScan                         => sign_scan::draw(display)?,
         AppState::SignReview                       => sign_review::draw(display)?,
