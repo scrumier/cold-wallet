@@ -30,6 +30,9 @@ fn log_transition(before: AppState, after: AppState) {
         (ConfirmPin { len: before_len, .. }, ConfirmPin { len: after_len, .. }) => {
             println!("[WALLET] ConfirmPin: {after_len}/6 digits entered (was {before_len})");
         }
+        (EnterPin { len: before_len, .. }, EnterPin { len: after_len, .. }) => {
+            println!("[WALLET] EnterPin: {after_len}/6 digits entered (was {before_len})");
+        }
         _ => println!("[WALLET] {} → {}", state_name(before), state_name(after)),
     }
 }
@@ -46,7 +49,7 @@ fn state_name(state: AppState) -> &'static str {
         EnterPassphrase { .. } => "EnterPassphrase",
         SetPin { .. }          => "SetPin",
         ConfirmPin { .. }      => "ConfirmPin",
-        EnterPin               => "EnterPin",
+        EnterPin { .. }        => "EnterPin",
         Home                   => "Home",
         Receive                => "Receive",
         SignScan               => "SignScan",
@@ -54,7 +57,10 @@ fn state_name(state: AppState) -> &'static str {
         SignResult             => "SignResult",
         Accounts               => "Accounts",
         Settings               => "Settings",
-        ShowMnemonic           => "ShowMnemonic",
+        ShowMnemonic { page }  => match page {
+            0 => "ShowMnemonic(1/4)", 1 => "ShowMnemonic(2/4)",
+            2 => "ShowMnemonic(3/4)", _ => "ShowMnemonic(4/4)",
+        },
         ChangePin              => "ChangePin",
         About                  => "About",
         PinMismatch            => "PinMismatch",
