@@ -64,6 +64,25 @@ pub const DOT_GAP: i32  = 20;
 pub const DOTS_X: i32   = (SCREEN_W - (6 * DOT_SIZE + 5 * DOT_GAP)) / 2;
 pub const DOTS_Y: i32   = 70;
 
+// Sign flow
+pub const SIGN_VF_W: i32 = 400;
+pub const SIGN_VF_H: i32 = 300;
+pub const SIGN_VF_X: i32 = (SCREEN_W - SIGN_VF_W) / 2;
+pub const SIGN_VF_Y: i32 = 70;
+
+// Receive screen
+pub const QR_SIZE: i32 = 240;
+pub const QR_X: i32    = (SCREEN_W - QR_SIZE) / 2;
+pub const QR_Y: i32    = 110;
+
+// Settings screen
+pub const SETTINGS_BTN_W: i32 = 360;
+pub const SETTINGS_BTN_H: i32 = 60;
+pub const SETTINGS_BTN_X: i32 = (SCREEN_W - SETTINGS_BTN_W) / 2;
+pub const SETTINGS_Y0: i32    = 120;
+pub const SETTINGS_Y1: i32    = 210;
+pub const SETTINGS_Y2: i32    = 300;
+
 // Home grid (2x2)
 pub const HOME_BTN_W: i32 = 300;
 pub const HOME_BTN_H: i32 = 140;
