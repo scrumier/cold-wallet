@@ -1,7 +1,14 @@
+mod about;
+mod accounts;
 mod home;
 mod mnemonic;
 mod passphrase;
 mod pin;
+mod receive;
+mod settings;
+mod sign_review;
+mod sign_result;
+mod sign_scan;
 mod welcome;
 
 use embedded_graphics::pixelcolor::Rgb565;
@@ -26,7 +33,16 @@ where
         AppState::SetPin { order, len, .. }        => pin::draw(display, &order, len, false)?,
         AppState::ConfirmPin { order, len, .. }    => pin::draw(display, &order, len, true)?,
         AppState::PinMismatch                      => pin::draw_mismatch(display)?,
+        AppState::EnterPin { order, len, .. }      => pin::draw(display, &order, len, false)?,
         AppState::Home                             => home::draw(display)?,
+        AppState::Receive                          => receive::draw(display)?,
+        AppState::Accounts                         => accounts::draw(display)?,
+        AppState::Settings                         => settings::draw(display)?,
+        AppState::ShowMnemonic { page }            => mnemonic::draw(display, page)?,
+        AppState::About                            => about::draw(display)?,
+        AppState::SignScan                         => sign_scan::draw(display)?,
+        AppState::SignReview                       => sign_review::draw(display)?,
+        AppState::SignResult                       => sign_result::draw(display)?,
         _                                          => draw_placeholder(display, state)?,
     }
 
@@ -39,16 +55,10 @@ where
 {
     let label = match state {
         AppState::RestoreWallet => "Restore Wallet",
-        AppState::EnterPin      => "Enter PIN",
-        AppState::Receive       => "Receive",
         AppState::SignScan      => "Scan QR",
         AppState::SignReview    => "Review TX",
         AppState::SignResult    => "Signed QR",
-        AppState::Accounts      => "Accounts",
-        AppState::Settings      => "Settings",
-        AppState::ShowMnemonic  => "Show Mnemonic",
         AppState::ChangePin     => "Change PIN",
-        AppState::About         => "About",
         _                       => "—",
     };
 
@@ -59,6 +69,7 @@ where
 
 // Shared helpers — pub(crate) so screen modules can use them
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_button<D>(
     display: &mut D,
     x: i32, y: i32, w: i32, h: i32,

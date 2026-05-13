@@ -33,13 +33,13 @@ where
     }
 
     let mut digit_buf = [0u8; 1];
-    for pos in 0..10usize {
+    for (pos, &digit) in order.iter().enumerate() {
         let (kx, ky) = pin_key_pos(pos);
         Rectangle::new(Point::new(kx, ky), Size::new(PIN_KEY_W as u32, PIN_KEY_H as u32))
             .into_styled(white_stroke(2))
             .draw(display)?;
 
-        digit_buf[0] = b'0' + order[pos];
+        digit_buf[0] = b'0' + digit;
         let s = core::str::from_utf8(&digit_buf).unwrap_or("?");
         Text::with_alignment(s, Point::new(kx + PIN_KEY_W / 2, ky + PIN_KEY_H / 2 + 7), btn_t, Center)
             .draw(display)?;
