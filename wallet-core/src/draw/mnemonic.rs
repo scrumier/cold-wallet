@@ -7,10 +7,9 @@ use embedded_graphics::primitives::{PrimitiveStyleBuilder, Rectangle};
 use embedded_graphics::text::{Alignment::Center, Text};
 
 use crate::layout::{SCREEN_W, NAV_PREV_X, NAV_NEXT_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H};
-use crate::state::MNEMONIC;
 use super::{draw_button, white_stroke, dim_stroke, white_text, dim_text, fmt_u8};
 
-pub fn draw<D>(display: &mut D, page: u8) -> Result<(), D::Error>
+pub fn draw<D>(display: &mut D, page: u8, words: &[&'static str; 24]) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -32,7 +31,7 @@ where
         let mut num_buf = [0u8; 4];
         Text::new(fmt_u8(idx as u8 + 1, &mut num_buf), Point::new(80, row_y + 15), num_t)
             .draw(display)?;
-        Text::new(MNEMONIC[idx], Point::new(120, row_y + 15), white_text()).draw(display)?;
+        Text::new(words[idx], Point::new(120, row_y + 15), white_text()).draw(display)?;
 
         Rectangle::new(Point::new(80, row_y + 40), Size::new(640, 1))
             .into_styled(PrimitiveStyleBuilder::new().fill_color(Rgb565::new(6, 12, 6)).build())
