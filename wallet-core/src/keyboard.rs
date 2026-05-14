@@ -42,3 +42,36 @@ pub fn passphrase_key_at(x: i32, y: i32) -> Option<KeyPress> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_letter_keys() {
+        assert!(matches!(passphrase_key_at(ROW0_X + 1, ROW0_Y + 1), Some(KeyPress::Char(b'Q'))));
+        assert!(matches!(passphrase_key_at(ROW1_X + 1, ROW1_Y + 1), Some(KeyPress::Char(b'A'))));
+        assert!(matches!(passphrase_key_at(ROW2_X + 1, ROW2_Y + 1), Some(KeyPress::Char(b'Z'))));
+    }
+
+    #[test]
+    fn maps_space_and_backspace() {
+        assert!(matches!(passphrase_key_at(SPACE_X + 1, ROW3_Y + 1), Some(KeyPress::Space)));
+        assert!(matches!(
+            passphrase_key_at(BKSP_X + BKSP_W - 1, ROW2_Y + 1),
+            Some(KeyPress::Backspace)
+        ));
+        assert!(matches!(passphrase_key_at(BKSP_X + 1, ROW3_Y + 1), Some(KeyPress::Backspace)));
+    }
+
+    #[test]
+    fn maps_action_buttons() {
+        assert!(matches!(passphrase_key_at(PP_SKIP_X + 1, PP_BTN_Y + 1), Some(KeyPress::Skip)));
+        assert!(matches!(passphrase_key_at(PP_CONFIRM_X + 1, PP_BTN_Y + 1), Some(KeyPress::Confirm)));
+    }
+
+    #[test]
+    fn ignores_out_of_bounds() {
+        assert!(passphrase_key_at(0, 0).is_none());
+    }
+}
