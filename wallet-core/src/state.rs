@@ -355,12 +355,15 @@ pub fn in_rect(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
 mod tests {
     use super::*;
 
+    const LCG_MULTIPLIER: u32 = 1_664_525;
+    const LCG_INCREMENT: u32 = 1_013_904_223;
+
     fn create_touch_event_with_entropy(x: i32, y: i32, seed: u32) -> (WalletEvent, [u8; 32]) {
         let mut entropy = [0u8; 32];
         let mut s = seed;
         for chunk in entropy.chunks_exact_mut(4) {
             // LCG constants for deterministic test entropy expansion.
-            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            s = s.wrapping_mul(LCG_MULTIPLIER).wrapping_add(LCG_INCREMENT);
             chunk.copy_from_slice(&s.to_le_bytes());
         }
         (WalletEvent::Touch { x, y, entropy }, entropy)
@@ -473,7 +476,7 @@ mod tests {
             let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 3);
             let (next_state, new_pin, _) = step(state, event, None);
             state = next_state;
-            if new_pin.is_some() { result_pin = new_pin; }
+            result_pin = result_pin.or(new_pin);
         }
         assert_eq!(state, AppState::Home);
         assert_eq!(result_pin, Some([0, 1, 2, 3, 4, 5]));
