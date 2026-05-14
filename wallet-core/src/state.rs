@@ -358,7 +358,9 @@ mod tests {
     // LCG constants used to expand a seed into deterministic test entropy.
     const LCG_MULTIPLIER: u32 = 1_664_525;
     const LCG_INCREMENT: u32 = 1_013_904_223;
+    const ORDER: [u8; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
+    /// Creates a touch event with reproducible entropy derived from a seed.
     fn create_touch_event_with_entropy(x: i32, y: i32, seed: u32) -> (WalletEvent, [u8; 32]) {
         let mut entropy = [0u8; 32];
         let mut s = seed;
@@ -453,8 +455,7 @@ mod tests {
 
     #[test]
     fn set_pin_then_confirm_matches() {
-        let order = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let mut state = AppState::SetPin { order, digits: [0u8; 6], len: 0 };
+        let mut state = AppState::SetPin { order: ORDER, digits: [0u8; 6], len: 0 };
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
             let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 3);
@@ -469,7 +470,7 @@ mod tests {
         };
         assert_eq!(pin, [0, 1, 2, 3, 4, 5]);
 
-        let mut state = AppState::ConfirmPin { pin, order, digits: [0u8; 6], len: 0 };
+        let mut state = AppState::ConfirmPin { pin, order: ORDER, digits: [0u8; 6], len: 0 };
         let mut result_pin = None;
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
@@ -484,9 +485,8 @@ mod tests {
 
     #[test]
     fn confirm_pin_mismatch_flows_to_reset() {
-        let order = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let pin = [1u8; 6];
-        let mut state = AppState::ConfirmPin { pin, order, digits: [0u8; 6], len: 0 };
+        let mut state = AppState::ConfirmPin { pin, order: ORDER, digits: [0u8; 6], len: 0 };
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
             let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 4);
@@ -504,9 +504,8 @@ mod tests {
 
     #[test]
     fn enter_pin_unlock_gate() {
-        let order = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let stored = Some([0, 1, 2, 3, 4, 5]);
-        let mut state = AppState::EnterPin { order, digits: [0u8; 6], len: 0, gate: PinGate::Unlock };
+        let mut state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::Unlock };
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
             let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 5);
@@ -517,9 +516,8 @@ mod tests {
 
     #[test]
     fn enter_pin_rejects_mismatch() {
-        let order = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let stored = Some([0, 1, 2, 3, 4, 5]);
-        let mut state = AppState::EnterPin { order, digits: [0u8; 6], len: 0, gate: PinGate::Unlock };
+        let mut state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::Unlock };
         for pos in [1usize, 2, 3, 4, 5, 6] {
             let (x, y) = pin_key_pos(pos);
             let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 6);
