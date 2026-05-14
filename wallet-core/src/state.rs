@@ -411,7 +411,12 @@ mod tests {
         let (state, pin, words) = step(AppState::Welcome, event, None);
         assert_eq!(state, AppState::NewWallet { page: 0 });
         assert!(pin.is_none());
-        assert_eq!(words, Some(generate_words(&entropy)));
+        let words = words.expect("words should be generated");
+        assert_eq!(words, generate_words(&entropy));
+        let word_list = bip39::Language::English.word_list();
+        for word in &words {
+            assert!(word_list.contains(word));
+        }
     }
 
     #[test]
@@ -454,6 +459,20 @@ mod tests {
     }
 
     #[test]
+    fn passphrase_buffer_limits_input() {
+        let buf = [b'A'; 32];
+        let (event, _) = create_touch_event_with_entropy(ROW0_X + 1, ROW0_Y + 1, 10);
+        let (state, _, _) = step(AppState::EnterPassphrase { buf, len: 32 }, event, None);
+        match state {
+            AppState::EnterPassphrase { buf: next_buf, len } => {
+                assert_eq!(len, 32);
+                assert_eq!(next_buf, buf);
+            }
+            _ => panic!("expected EnterPassphrase"),
+        }
+    }
+
+    #[test]
     fn set_pin_then_confirm_matches() {
         let mut state = AppState::SetPin { order: ORDER, digits: [0u8; 6], len: 0 };
         for pos in 0..6 {
@@ -481,6 +500,23 @@ mod tests {
         }
         assert_eq!(state, AppState::Home);
         assert_eq!(result_pin, Some([0, 1, 2, 3, 4, 5]));
+    }
+
+    #[test]
+    fn set_pin_respects_custom_order() {
+        let order = [5u8, 4, 3, 2, 1, 0, 9, 8, 7, 6];
+        let mut state = AppState::SetPin { order, digits: [0u8; 6], len: 0 };
+        for pos in 0..6 {
+            let (x, y) = pin_key_pos(pos);
+            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 11);
+            state = step(state, event, None).0;
+        }
+        match state {
+            AppState::ConfirmPin { pin, .. } => {
+                assert_eq!(pin, [5, 4, 3, 2, 1, 0]);
+            }
+            _ => panic!("expected ConfirmPin"),
+        }
     }
 
     #[test]
@@ -512,6 +548,33 @@ mod tests {
             state = step(state, event, stored).0;
         }
         assert_eq!(state, AppState::Home);
+    }
+
+    #[test]
+    fn enter_pin_show_mnemonic_gate() {
+        let stored = Some([0, 1, 2, 3, 4, 5]);
+        let mut state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::ShowMnemonic };
+        for pos in 0..6 {
+            let (x, y) = pin_key_pos(pos);
+            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 12);
+            state = step(state, event, stored).0;
+        }
+        assert_eq!(state, AppState::ShowMnemonic { page: 0 });
+    }
+
+    #[test]
+    fn enter_pin_change_pin_gate() {
+        let stored = Some([0, 1, 2, 3, 4, 5]);
+        let mut state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::ChangePin };
+        for pos in 0..6 {
+            let (x, y) = pin_key_pos(pos);
+            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 13);
+            state = step(state, event, stored).0;
+        }
+        match state {
+            AppState::SetPin { len, .. } => assert_eq!(len, 0),
+            _ => panic!("expected SetPin"),
+        }
     }
 
     #[test]
