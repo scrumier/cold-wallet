@@ -363,7 +363,6 @@ mod tests {
         let mut entropy = [0u8; 32];
         let mut s = seed;
         for chunk in entropy.chunks_exact_mut(4) {
-            // LCG constants for deterministic test entropy expansion.
             s = s.wrapping_mul(LCG_MULTIPLIER).wrapping_add(LCG_INCREMENT);
             chunk.copy_from_slice(&s.to_le_bytes());
         }
