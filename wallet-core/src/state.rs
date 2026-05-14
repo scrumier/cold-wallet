@@ -355,7 +355,7 @@ pub fn in_rect(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
 mod tests {
     use super::*;
 
-    fn event_with_entropy(x: i32, y: i32, seed: u32) -> (WalletEvent, [u8; 32]) {
+    fn touch_event_with_seed(x: i32, y: i32, seed: u32) -> (WalletEvent, [u8; 32]) {
         let mut entropy = [0u8; 32];
         entropy[..4].copy_from_slice(&seed.to_le_bytes());
         (WalletEvent::Touch { x, y, entropy }, entropy)
@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn welcome_new_wallet_generates_words() {
-        let (event, entropy) = event_with_entropy(BTN_X + 1, BTN_NEW_Y + 1, 42);
+        let (event, entropy) = touch_event_with_seed(BTN_X + 1, BTN_NEW_Y + 1, 42);
         let (state, pin, words) = step(AppState::Welcome, event, None);
         assert_eq!(state, AppState::NewWallet { page: 0 });
         assert!(pin.is_none());
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn welcome_restore_wallet() {
-        let (event, _) = event_with_entropy(BTN_X + 1, BTN_RESTORE_Y + 1, 7);
+        let (event, _) = touch_event_with_seed(BTN_X + 1, BTN_RESTORE_Y + 1, 7);
         let (state, _, words) = step(AppState::Welcome, event, None);
         assert_eq!(state, AppState::RestoreWallet);
         assert!(words.is_none());
@@ -414,18 +414,18 @@ mod tests {
 
     #[test]
     fn new_wallet_navigation() {
-        let (event, _) = event_with_entropy(NAV_NEXT_X + 1, NAV_BTN_Y + 1, 1);
+        let (event, _) = touch_event_with_seed(NAV_NEXT_X + 1, NAV_BTN_Y + 1, 1);
         let (state, _, _) = step(AppState::NewWallet { page: 0 }, event, None);
         assert_eq!(state, AppState::NewWallet { page: 1 });
 
-        let (event, _) = event_with_entropy(NAV_NEXT_X + 1, NAV_BTN_Y + 1, 1);
+        let (event, _) = touch_event_with_seed(NAV_NEXT_X + 1, NAV_BTN_Y + 1, 1);
         let (state, _, _) = step(AppState::NewWallet { page: 3 }, event, None);
         assert_eq!(state, AppState::EnterPassphrase { buf: [0u8; 32], len: 0 });
     }
 
     #[test]
     fn enter_passphrase_accepts_input_and_skips() {
-        let (event, _) = event_with_entropy(ROW0_X + 1, ROW0_Y + 1, 9);
+        let (event, _) = touch_event_with_seed(ROW0_X + 1, ROW0_Y + 1, 9);
         let (state, _, _) = step(AppState::EnterPassphrase { buf: [0u8; 32], len: 0 }, event, None);
         match state {
             AppState::EnterPassphrase { buf, len } => {
@@ -435,7 +435,7 @@ mod tests {
             _ => panic!("expected EnterPassphrase"),
         }
 
-        let (event, _) = event_with_entropy(PP_SKIP_X + 1, PP_BTN_Y + 1, 9);
+        let (event, _) = touch_event_with_seed(PP_SKIP_X + 1, PP_BTN_Y + 1, 9);
         let (state, _, _) = step(AppState::EnterPassphrase { buf: [0u8; 32], len: 0 }, event, None);
         match state {
             AppState::SetPin { len, .. } => assert_eq!(len, 0),
@@ -449,7 +449,7 @@ mod tests {
         let mut state = AppState::SetPin { order, digits: [0u8; 6], len: 0 };
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
-            let (event, _) = event_with_entropy(x + 1, y + 1, 3);
+            let (event, _) = touch_event_with_seed(x + 1, y + 1, 3);
             state = step(state, event, None).0;
         }
         let pin = match state {
@@ -465,7 +465,7 @@ mod tests {
         let mut result_pin = None;
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
-            let (event, _) = event_with_entropy(x + 1, y + 1, 3);
+            let (event, _) = touch_event_with_seed(x + 1, y + 1, 3);
             let (next_state, new_pin, _) = step(state, event, None);
             state = next_state;
             if new_pin.is_some() { result_pin = new_pin; }
@@ -481,12 +481,12 @@ mod tests {
         let mut state = AppState::ConfirmPin { pin, order, digits: [0u8; 6], len: 0 };
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
-            let (event, _) = event_with_entropy(x + 1, y + 1, 4);
+            let (event, _) = touch_event_with_seed(x + 1, y + 1, 4);
             state = step(state, event, None).0;
         }
         assert_eq!(state, AppState::PinMismatch);
 
-        let (event, _) = event_with_entropy(0, 0, 4);
+        let (event, _) = touch_event_with_seed(0, 0, 4);
         let (state, _, _) = step(state, event, None);
         match state {
             AppState::SetPin { len, .. } => assert_eq!(len, 0),
@@ -501,7 +501,7 @@ mod tests {
         let mut state = AppState::EnterPin { order, digits: [0u8; 6], len: 0, gate: PinGate::Unlock };
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
-            let (event, _) = event_with_entropy(x + 1, y + 1, 5);
+            let (event, _) = touch_event_with_seed(x + 1, y + 1, 5);
             state = step(state, event, stored).0;
         }
         assert_eq!(state, AppState::Home);
