@@ -355,6 +355,7 @@ pub fn in_rect(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
 mod tests {
     use super::*;
 
+    // LCG constants used to expand a seed into deterministic test entropy.
     const LCG_MULTIPLIER: u32 = 1_664_525;
     const LCG_INCREMENT: u32 = 1_013_904_223;
 
