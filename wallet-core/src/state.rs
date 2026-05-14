@@ -511,4 +511,23 @@ mod tests {
         }
         assert_eq!(state, AppState::Home);
     }
+
+    #[test]
+    fn enter_pin_rejects_mismatch() {
+        let order = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let stored = Some([0, 1, 2, 3, 4, 5]);
+        let mut state = AppState::EnterPin { order, digits: [0u8; 6], len: 0, gate: PinGate::Unlock };
+        for pos in [1usize, 2, 3, 4, 5, 6] {
+            let (x, y) = pin_key_pos(pos);
+            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 6);
+            state = step(state, event, stored).0;
+        }
+        match state {
+            AppState::EnterPin { len, gate, .. } => {
+                assert_eq!(len, 0);
+                assert_eq!(gate, PinGate::Unlock);
+            }
+            _ => panic!("expected EnterPin"),
+        }
+    }
 }
