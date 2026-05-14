@@ -357,7 +357,11 @@ mod tests {
 
     fn touch_event_with_seed(x: i32, y: i32, seed: u32) -> (WalletEvent, [u8; 32]) {
         let mut entropy = [0u8; 32];
-        entropy[..4].copy_from_slice(&seed.to_le_bytes());
+        let mut s = seed;
+        for chunk in entropy.chunks_exact_mut(4) {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            chunk.copy_from_slice(&s.to_le_bytes());
+        }
         (WalletEvent::Touch { x, y, entropy }, entropy)
     }
 
