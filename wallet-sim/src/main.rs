@@ -28,6 +28,23 @@ fn entropy() -> [u8; 32] {
 fn log_transition(before: AppState, after: AppState) {
     use AppState::*;
     match (before, after) {
+        // Restore: word confirmed
+        (RestoreWallet { word_idx: wi_before, .. },
+         RestoreWallet { word_idx: wi_after, confirmed, error: false, .. })
+            if wi_after > wi_before =>
+        {
+            let word = bip39::Language::English.word_list()[confirmed[wi_before as usize] as usize];
+            println!("[WALLET] Restore: word {wi_after}/24 confirmed: \"{word}\"");
+        }
+        // Restore: bad checksum
+        (RestoreWallet { .. }, RestoreWallet { error: true, .. }) =>
+            println!("[WALLET] Restore: invalid mnemonic checksum — please re-enter all 24 words"),
+        // Restore complete → passphrase entry
+        (RestoreWallet { .. }, EnterPassphrase { .. }) =>
+            println!("[WALLET] Restore: all 24 words accepted"),
+        // Restore: regular typing / no meaningful change — stay silent
+        (RestoreWallet { .. }, RestoreWallet { .. }) => {}
+
         (EnterPassphrase { .. }, EnterPassphrase { buf, len }) => {
             let typed = core::str::from_utf8(&buf[..len as usize]).unwrap_or("?");
             println!("[WALLET] passphrase: \"{typed}\"");

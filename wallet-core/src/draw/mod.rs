@@ -40,8 +40,8 @@ where
         AppState::ConfirmPin { order, len, .. }    => pin::draw(display, &order, len, true)?,
         AppState::PinMismatch                      => pin::draw_mismatch(display)?,
         AppState::EnterPin { order, len, .. }      => pin::draw(display, &order, len, false)?,
-        AppState::RestoreWallet { word_idx, buf, buf_len, .. }
-                                                   => restore::draw(display, word_idx, &buf, buf_len)?,
+        AppState::RestoreWallet { word_idx, buf, buf_len, error, .. }
+                                                   => restore::draw(display, word_idx, &buf, buf_len, error)?,
         AppState::Home                             => home::draw(display)?,
         AppState::Receive                          => receive::draw(display, address)?,
         AppState::Accounts                         => accounts::draw(display)?,

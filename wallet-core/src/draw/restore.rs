@@ -22,12 +22,14 @@ pub fn draw<D>(
     word_idx: u8,
     buf: &[u8; 8],
     buf_len: u8,
+    error: bool,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     let small  = MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_GRAY);
     let hi     = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+    let red    = MonoTextStyle::new(&FONT_6X10, Rgb565::RED);
 
     // ── Progress line ─────────────────────────────────────────────────────────
     {
@@ -47,6 +49,15 @@ where
         let x_sep = x_idx + 6 * idx_s.len() as i32;
         Text::new(" / ", Point::new(x_sep,              RESTORE_PROGRESS_Y), small).draw(display)?;
         Text::new(tot_s,  Point::new(x_sep + 6 * 3,    RESTORE_PROGRESS_Y), small).draw(display)?;
+    }
+
+    // ── Error banner ──────────────────────────────────────────────────────────
+    if error {
+        Text::new(
+            "Invalid mnemonic - please re-enter all 24 words",
+            Point::new(SCREEN_W / 2 - 150, RESTORE_PROGRESS_Y + 16),
+            red,
+        ).draw(display)?;
     }
 
     // ── Typed prefix + cursor ─────────────────────────────────────────────────

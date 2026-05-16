@@ -20,6 +20,7 @@ pub enum AppState {
         buf:       [u8; 8],   // lowercase ASCII prefix typed so far
         buf_len:   u8,
         confirmed: [u16; 24], // BIP39 word indices for each confirmed word
+        error:     bool,      // true when the last 24-word set failed BIP39 checksum
     },
     EnterPassphrase  { buf: [u8; 32], len: u8 },
     SetPin           { order: [u8; 10], digits: [u8; 6], len: u8 },
@@ -119,7 +120,7 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
                 (AppState::NewWallet { page: 0 }, None, Some(generate_words(&entropy)), Some(entropy))
             } else if in_rect(x, y, BTN_X, BTN_RESTORE_Y, BTN_W, BTN_H) {
                 (AppState::RestoreWallet {
-                    word_idx: 0, buf: [0u8; 8], buf_len: 0, confirmed: [0u16; 24],
+                    word_idx: 0, buf: [0u8; 8], buf_len: 0, confirmed: [0u16; 24], error: false,
                 }, None, None, None)
             } else {
                 (AppState::Welcome, None, None, None)
@@ -344,7 +345,7 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
             }
         }
 
-        AppState::RestoreWallet { word_idx, buf, buf_len, confirmed } => {
+        AppState::RestoreWallet { word_idx, buf, buf_len, confirmed, error } => {
             // Cancel → Welcome
             if matches!(passphrase_key_at(x, y), Some(KeyPress::Skip)) {
                 return (AppState::Welcome, None, None, None);
@@ -358,36 +359,37 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
                 let next = word_idx + 1;
                 if next == 24 {
                     // All words entered — validate checksum
-                    if let Some(entropy) = indices_to_entropy(&c) {
-                        let words = generate_words(&entropy);
+                    if let Some(ent) = indices_to_entropy(&c) {
+                        let words = generate_words(&ent);
                         return (
                             AppState::EnterPassphrase { buf: [0u8; 32], len: 0 },
                             None,
                             Some(words),
-                            Some(entropy),
+                            Some(ent),
                         );
                     }
-                    // Bad checksum → restart entry
+                    // Bad checksum — stay at word 0 with visible error
                     return (AppState::RestoreWallet {
-                        word_idx: 0, buf: [0u8; 8], buf_len: 0, confirmed: [0u16; 24],
+                        word_idx: 0, buf: [0u8; 8], buf_len: 0,
+                        confirmed: [0u16; 24], error: true,
                     }, None, None, None);
                 }
                 return (AppState::RestoreWallet {
-                    word_idx: next, buf: [0u8; 8], buf_len: 0, confirmed: c,
+                    word_idx: next, buf: [0u8; 8], buf_len: 0, confirmed: c, error: false,
                 }, None, None, None);
             }
 
-            // Keyboard input
+            // Keyboard input — clears error on any keystroke
             match passphrase_key_at(x, y) {
                 Some(KeyPress::Char(c)) if buf_len < 8 => {
                     let mut b = buf;
                     b[buf_len as usize] = c | 0x20; // uppercase → lowercase
-                    (AppState::RestoreWallet { word_idx, buf: b, buf_len: buf_len + 1, confirmed }, None, None, None)
+                    (AppState::RestoreWallet { word_idx, buf: b, buf_len: buf_len + 1, confirmed, error: false }, None, None, None)
                 }
                 Some(KeyPress::Backspace) if buf_len > 0 => {
-                    (AppState::RestoreWallet { word_idx, buf, buf_len: buf_len - 1, confirmed }, None, None, None)
+                    (AppState::RestoreWallet { word_idx, buf, buf_len: buf_len - 1, confirmed, error: false }, None, None, None)
                 }
-                _ => (AppState::RestoreWallet { word_idx, buf, buf_len, confirmed }, None, None, None),
+                _ => (AppState::RestoreWallet { word_idx, buf, buf_len, confirmed, error }, None, None, None),
             }
         }
 
@@ -512,7 +514,7 @@ mod tests {
     #[test]
     fn restore_wallet_keyboard_entry() {
         let init = AppState::RestoreWallet {
-            word_idx: 0, buf: [0u8; 8], buf_len: 0, confirmed: [0u16; 24],
+            word_idx: 0, buf: [0u8; 8], buf_len: 0, confirmed: [0u16; 24], error: false,
         };
         // Tap 'Q' on keyboard (ROW0_X + 1, ROW0_Y + 1) → stored as 'q' (lowercase)
         let (event, _) = create_touch_event_with_entropy(ROW0_X + 1, ROW0_Y + 1, 77);
@@ -530,7 +532,7 @@ mod tests {
     fn restore_wallet_backspace() {
         let mut buf = [0u8; 8]; buf[0] = b'a';
         let init = AppState::RestoreWallet {
-            word_idx: 0, buf, buf_len: 1, confirmed: [0u16; 24],
+            word_idx: 0, buf, buf_len: 1, confirmed: [0u16; 24], error: false,
         };
         // BKSP_X overlaps the 'B' key at ROW2 — use a coordinate clearly past all letter keys.
         let (event, _) = create_touch_event_with_entropy(BKSP_X + BKSP_W - 5, ROW2_Y + 1, 88);
@@ -544,7 +546,7 @@ mod tests {
     #[test]
     fn restore_wallet_cancel_returns_to_welcome() {
         let init = AppState::RestoreWallet {
-            word_idx: 5, buf: [0u8; 8], buf_len: 0, confirmed: [0u16; 24],
+            word_idx: 5, buf: [0u8; 8], buf_len: 0, confirmed: [0u16; 24], error: false,
         };
         let (event, _) = create_touch_event_with_entropy(PP_SKIP_X + 1, PP_BTN_Y + 1, 99);
         let (state, _, _, _) = step(init, event, None);
@@ -555,8 +557,6 @@ mod tests {
     fn restore_wallet_full_round_trip() {
         // Encode a known entropy, get the 24 word indices, simulate tapping each
         // suggestion (index 0 in suggestions = word_list[idx]) through the state machine.
-        use crate::derive::indices_to_entropy;
-
         let entropy = [0x11u8; 32];
         let m = bip39::Mnemonic::from_entropy(&entropy).unwrap();
         let word_list = bip39::Language::English.word_list();
@@ -566,7 +566,7 @@ mod tests {
         }
 
         let mut state = AppState::RestoreWallet {
-            word_idx: 0, buf: [0u8; 8], buf_len: 0, confirmed: [0u16; 24],
+            word_idx: 0, buf: [0u8; 8], buf_len: 0, confirmed: [0u16; 24], error: false,
         };
 
         for wi in 0..24usize {
@@ -584,7 +584,7 @@ mod tests {
                     // Set state with this prefix then tap suggestion 0
                     if let AppState::RestoreWallet { word_idx, confirmed, .. } = state {
                         state = AppState::RestoreWallet {
-                            word_idx, buf, buf_len: char_count as u8, confirmed,
+                            word_idx, buf, buf_len: char_count as u8, confirmed, error: false,
                         };
                     }
                     break;

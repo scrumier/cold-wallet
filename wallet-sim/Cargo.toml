@@ -7,3 +7,4 @@ edition = "2024"
 wallet-core = { path = "../wallet-core" }
 embedded-graphics = { workspace = true }
 embedded-graphics-simulator = "0.8.0"
+bip39 = { workspace = true }
