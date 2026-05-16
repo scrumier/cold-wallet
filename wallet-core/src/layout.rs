@@ -83,6 +83,18 @@ pub const SETTINGS_Y0: i32    = 120;
 pub const SETTINGS_Y1: i32    = 210;
 pub const SETTINGS_Y2: i32    = 300;
 
+// RestoreWallet input + suggestion strip (sits above the QWERTY keyboard at KB_Y=115)
+pub const RESTORE_PROGRESS_Y: i32 = 45;
+pub const RESTORE_INPUT_Y: i32    = 65;
+pub const RESTORE_SUGGEST_Y: i32  = 78;
+pub const RESTORE_SUGGEST_H: i32  = 37;  // exactly fills Y=78..115 = KB_Y
+pub const RESTORE_SUGGEST_W: i32  = 200;
+pub const RESTORE_SUGGEST_GAP: i32 = 20;
+pub const RESTORE_SUGGEST_X0: i32 =
+    (SCREEN_W - 3 * RESTORE_SUGGEST_W - 2 * RESTORE_SUGGEST_GAP) / 2; // 80
+pub const RESTORE_SUGGEST_X1: i32 = RESTORE_SUGGEST_X0 + RESTORE_SUGGEST_W + RESTORE_SUGGEST_GAP; // 300
+pub const RESTORE_SUGGEST_X2: i32 = RESTORE_SUGGEST_X1 + RESTORE_SUGGEST_W + RESTORE_SUGGEST_GAP; // 520
+
 // Home grid (2x2)
 pub const HOME_BTN_W: i32 = 300;
 pub const HOME_BTN_H: i32 = 140;

@@ -49,6 +49,23 @@ where
     Ok(())
 }
 
+/// Draws the QWERTY rows + space/backspace bar without any passphrase-specific chrome.
+/// Used by both the passphrase and restore-wallet screens.
+pub(crate) fn draw_keyboard<D>(display: &mut D) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let key_s = white_stroke(1);
+    let btn_s = white_stroke(2);
+    let btn_t = white_text();
+    draw_key_row(display, ROW0, ROW0_X, ROW0_Y, key_s, btn_t)?;
+    draw_key_row(display, ROW1, ROW1_X, ROW1_Y, key_s, btn_t)?;
+    draw_key_row(display, ROW2, ROW2_X, ROW2_Y, key_s, btn_t)?;
+    draw_button(display, SPACE_X, ROW3_Y, SPACE_W, KEY_H, "SPACE", btn_s, btn_t)?;
+    draw_button(display, BKSP_X,  ROW3_Y, BKSP_W,  KEY_H, "<-",    btn_s, btn_t)?;
+    Ok(())
+}
+
 fn draw_key_row<D>(
     display: &mut D,
     keys: &[u8],

@@ -5,6 +5,7 @@ mod mnemonic;
 mod passphrase;
 mod pin;
 mod receive;
+mod restore;
 mod settings;
 mod sign_review;
 mod sign_result;
@@ -39,6 +40,8 @@ where
         AppState::ConfirmPin { order, len, .. }    => pin::draw(display, &order, len, true)?,
         AppState::PinMismatch                      => pin::draw_mismatch(display)?,
         AppState::EnterPin { order, len, .. }      => pin::draw(display, &order, len, false)?,
+        AppState::RestoreWallet { word_idx, buf, buf_len, .. }
+                                                   => restore::draw(display, word_idx, &buf, buf_len)?,
         AppState::Home                             => home::draw(display)?,
         AppState::Receive                          => receive::draw(display, address)?,
         AppState::Accounts                         => accounts::draw(display)?,
@@ -59,7 +62,6 @@ where
     D: DrawTarget<Color = Rgb565>,
 {
     let label = match state {
-        AppState::RestoreWallet => "Restore Wallet",
         AppState::SignScan      => "Scan QR",
         AppState::SignReview    => "Review TX",
         AppState::SignResult    => "Signed QR",

@@ -139,9 +139,68 @@ fn bech32m_polymod(values: &[u8]) -> u32 {
     chk
 }
 
+// ── BIP39 word-index decoding ────────────────────────────────────────────────
+
+/// Converts 24 BIP39 word indices (0–2047) to the original 32-byte entropy.
+///
+/// Each index is 11 bits; 24 × 11 = 264 bits = 256-bit entropy + 8-bit checksum.
+/// Returns `None` if the SHA256 checksum embedded in the indices is invalid.
+pub fn indices_to_entropy(indices: &[u16; 24]) -> Option<[u8; 32]> {
+    // Pack 24 × 11 bits into 33 bytes, MSB-first.
+    let mut raw = [0u8; 33];
+    for (word, &idx) in indices.iter().enumerate() {
+        let bit_start = word * 11;
+        for bit in 0..11usize {
+            if (idx >> (10 - bit)) & 1 == 1 {
+                let pos = bit_start + bit;
+                raw[pos / 8] |= 1 << (7 - pos % 8);
+            }
+        }
+    }
+    // First 32 bytes = entropy; raw[32] holds the 8-bit checksum.
+    let mut entropy = [0u8; 32];
+    entropy.copy_from_slice(&raw[..32]);
+    // BIP39 checksum = first 8 bits of SHA256(entropy).
+    let hash = sha256::Hash::hash(&entropy);
+    let hash_bytes: &[u8] = hash.as_ref();
+    if hash_bytes[0] == raw[32] {
+        Some(entropy)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indices_to_entropy_round_trip() {
+        // Encode a known entropy as a BIP39 mnemonic, extract word indices,
+        // then verify that indices_to_entropy reconstructs the original entropy.
+        let entropy = [0x42u8; 32];
+        let m = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let word_list = bip39::Language::English.word_list();
+        let mut indices = [0u16; 24];
+        for (i, word) in m.words().enumerate() {
+            indices[i] = word_list.iter().position(|&w| w == word).unwrap() as u16;
+        }
+        assert_eq!(indices_to_entropy(&indices), Some(entropy));
+    }
+
+    #[test]
+    fn indices_to_entropy_bad_checksum() {
+        // Flip a bit in the entropy area — checksum should fail.
+        let entropy = [0x42u8; 32];
+        let m = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let word_list = bip39::Language::English.word_list();
+        let mut indices = [0u16; 24];
+        for (i, word) in m.words().enumerate() {
+            indices[i] = word_list.iter().position(|&w| w == word).unwrap() as u16;
+        }
+        indices[0] ^= 1; // corrupt first word
+        assert!(indices_to_entropy(&indices).is_none());
+    }
 
     #[test]
     fn bech32m_address_format() {

@@ -50,7 +50,9 @@ fn state_name(state: AppState) -> &'static str {
             0 => "NewWallet(1/4)", 1 => "NewWallet(2/4)",
             2 => "NewWallet(3/4)", _ => "NewWallet(4/4)",
         },
-        RestoreWallet          => "RestoreWallet",
+        RestoreWallet { word_idx, .. } => {
+            if word_idx < 24 { "RestoreWallet(entry)" } else { "RestoreWallet(done)" }
+        }
         EnterPassphrase { .. } => "EnterPassphrase",
         SetPin { .. }          => "SetPin",
         ConfirmPin { .. }      => "ConfirmPin",
