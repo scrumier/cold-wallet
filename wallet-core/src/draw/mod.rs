@@ -20,7 +20,12 @@ use embedded_graphics::text::{Alignment::Center, Text};
 
 use crate::state::AppState;
 
-pub fn draw_ui<D>(display: &mut D, state: AppState, words: &[&'static str; 24]) -> Result<(), D::Error>
+pub fn draw_ui<D>(
+    display: &mut D,
+    state: AppState,
+    words: &[&'static str; 24],
+    address: Option<&str>,
+) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -35,7 +40,7 @@ where
         AppState::PinMismatch                      => pin::draw_mismatch(display)?,
         AppState::EnterPin { order, len, .. }      => pin::draw(display, &order, len, false)?,
         AppState::Home                             => home::draw(display)?,
-        AppState::Receive                          => receive::draw(display)?,
+        AppState::Receive                          => receive::draw(display, address)?,
         AppState::Accounts                         => accounts::draw(display)?,
         AppState::Settings                         => settings::draw(display)?,
         AppState::ShowMnemonic { page }            => mnemonic::draw(display, page, words)?,

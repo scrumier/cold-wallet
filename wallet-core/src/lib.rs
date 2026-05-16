@@ -1,5 +1,6 @@
 #![no_std]
 
+mod derive;
 mod draw;
 mod keyboard;
 mod layout;
@@ -14,5 +15,10 @@ pub fn draw_ui<D>(display: &mut D, wallet: &ColdWallet) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    draw::draw_ui(display, wallet.get_state(), wallet.mnemonic_words())
+    draw::draw_ui(
+        display,
+        wallet.get_state(),
+        wallet.mnemonic_words(),
+        wallet.receive_address(),
+    )
 }

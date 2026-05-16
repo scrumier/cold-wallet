@@ -10,7 +10,7 @@ embedded-graphics = "0.8.1"
 
 # Cryptography — all no_std compatible
 k256            = { version = "0.13.4", default-features = false, features = ["ecdsa"] }
-bip32           = { version = "0.5.3",  default-features = false }
+bip32           = { version = "0.5.3",  default-features = false, features = ["secp256k1"] }
 bip39           = { version = "2.2.2",  default-features = false }
 bitcoin_hashes  = { version = "0.20.0", default-features = false }
 

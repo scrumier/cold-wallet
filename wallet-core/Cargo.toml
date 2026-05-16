@@ -4,5 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-embedded-graphics = { workspace = true }
-bip39 = { workspace = true }
+embedded-graphics  = { workspace = true }
+bip39             = { workspace = true }
+bip32             = { workspace = true }
+k256              = { workspace = true }
+bitcoin_hashes    = { workspace = true }

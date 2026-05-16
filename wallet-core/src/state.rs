@@ -1,5 +1,6 @@
 use bip39::Mnemonic;
 
+use crate::derive::taproot_address;
 use crate::keyboard::{passphrase_key_at, KeyPress};
 use crate::layout::*;
 
@@ -37,29 +38,61 @@ pub enum WalletEvent {
 }
 
 pub struct ColdWallet {
-    pub state: AppState,
-    pin: Option<[u8; 6]>,
-    words: [&'static str; 24],
+    pub state:   AppState,
+    pin:         Option<[u8; 6]>,
+    words:       [&'static str; 24],
+    entropy:     [u8; 32],
+    address:     [u8; 62],
 }
 
 impl ColdWallet {
     pub fn new() -> Self {
-        Self { state: AppState::Welcome, pin: None, words: [""; 24] }
+        Self {
+            state:   AppState::Welcome,
+            pin:     None,
+            words:   [""; 24],
+            entropy: [0u8; 32],
+            address: [0u8; 62],
+        }
     }
 
-    pub fn get_state(&self) -> AppState {
-        self.state
-    }
+    pub fn get_state(&self) -> AppState { self.state }
 
-    pub fn mnemonic_words(&self) -> &[&'static str; 24] {
-        &self.words
+    pub fn mnemonic_words(&self) -> &[&'static str; 24] { &self.words }
+
+    /// Returns the derived P2TR address, or `None` if not yet derived.
+    pub fn receive_address(&self) -> Option<&str> {
+        if self.address[0] == b'b' {
+            core::str::from_utf8(&self.address).ok()
+        } else {
+            None
+        }
     }
 
     pub fn handle_event(&mut self, event: WalletEvent) {
-        let (new_state, new_pin, new_words) = step(self.state, event, self.pin);
+        let prev = self.state;
+        let (new_state, new_pin, new_words, new_entropy) = step(self.state, event, self.pin);
         self.state = new_state;
-        if let Some(pin) = new_pin { self.pin = Some(pin); }
-        if let Some(words) = new_words { self.words = words; }
+        if let Some(p) = new_pin     { self.pin     = Some(p); }
+        if let Some(w) = new_words   { self.words   = w; }
+        if let Some(e) = new_entropy { self.entropy = e; }
+
+        // Derive seed + address when the passphrase step is finalised.
+        if let AppState::EnterPassphrase { buf, len } = prev
+            && matches!(self.state, AppState::SetPin { .. })
+        {
+            let pp = core::str::from_utf8(&buf[..len as usize]).unwrap_or("");
+            self.derive_address(pp);
+        }
+    }
+
+    fn derive_address(&mut self, passphrase: &str) {
+        if let Ok(m) = Mnemonic::from_entropy(&self.entropy) {
+            let seed = m.to_seed_normalized(passphrase);
+            if let Some(addr) = taproot_address(&seed) {
+                self.address = addr;
+            }
+        }
     }
 }
 
@@ -67,7 +100,8 @@ impl Default for ColdWallet {
     fn default() -> Self { Self::new() }
 }
 
-type StepResult = (AppState, Option<[u8; 6]>, Option<[&'static str; 24]>);
+// (new_state, pin_to_store, words_to_store, entropy_to_store)
+type StepResult = (AppState, Option<[u8; 6]>, Option<[&'static str; 24]>, Option<[u8; 32]>);
 
 fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> StepResult {
     let WalletEvent::Touch { x, y, entropy } = event;
@@ -76,26 +110,27 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
     match state {
         AppState::Welcome => {
             if in_rect(x, y, BTN_X, BTN_NEW_Y, BTN_W, BTN_H) {
-                (AppState::NewWallet { page: 0 }, None, Some(generate_words(&entropy)))
+                // Store entropy so derive_address() can reconstruct the mnemonic later.
+                (AppState::NewWallet { page: 0 }, None, Some(generate_words(&entropy)), Some(entropy))
             } else if in_rect(x, y, BTN_X, BTN_RESTORE_Y, BTN_W, BTN_H) {
-                (AppState::RestoreWallet, None, None)
+                (AppState::RestoreWallet, None, None, None)
             } else {
-                (AppState::Welcome, None, None)
+                (AppState::Welcome, None, None, None)
             }
         }
 
         AppState::NewWallet { page } => {
-            let prev = in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H);
-            let next = in_rect(x, y, NAV_NEXT_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H);
+            let is_prev = in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H);
+            let is_next = in_rect(x, y, NAV_NEXT_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H);
 
-            if next && page < 3 {
-                (AppState::NewWallet { page: page + 1 }, None, None)
-            } else if next && page == 3 {
-                (AppState::EnterPassphrase { buf: [0u8; 32], len: 0 }, None, None)
-            } else if prev && page > 0 {
-                (AppState::NewWallet { page: page - 1 }, None, None)
+            if is_next && page < 3 {
+                (AppState::NewWallet { page: page + 1 }, None, None, None)
+            } else if is_next && page == 3 {
+                (AppState::EnterPassphrase { buf: [0u8; 32], len: 0 }, None, None, None)
+            } else if is_prev && page > 0 {
+                (AppState::NewWallet { page: page - 1 }, None, None, None)
             } else {
-                (AppState::NewWallet { page }, None, None)
+                (AppState::NewWallet { page }, None, None, None)
             }
         }
 
@@ -117,7 +152,7 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
                     Some(AppState::SetPin { order: shuffle(seed), digits: [0u8; 6], len: 0 }),
                 _ => None,
             };
-            (next.unwrap_or(AppState::EnterPassphrase { buf, len }), None, None)
+            (next.unwrap_or(AppState::EnterPassphrase { buf, len }), None, None, None)
         }
 
         AppState::SetPin { order, digits, len } => {
@@ -126,17 +161,17 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
                     let mut d = digits; d[len as usize] = digit;
                     let new_len = len + 1;
                     if new_len == 6 {
-                        (AppState::ConfirmPin { pin: d, order: shuffle(seed), digits: [0u8; 6], len: 0 }, None, None)
+                        (AppState::ConfirmPin { pin: d, order: shuffle(seed), digits: [0u8; 6], len: 0 }, None, None, None)
                     } else {
-                        (AppState::SetPin { order, digits: d, len: new_len }, None, None)
+                        (AppState::SetPin { order, digits: d, len: new_len }, None, None, None)
                     }
                 } else {
-                    (AppState::SetPin { order, digits, len }, None, None)
+                    (AppState::SetPin { order, digits, len }, None, None, None)
                 }
             } else if in_rect(x, y, PIN_DEL_X, PIN_DEL_Y, PIN_DEL_W, PIN_DEL_H) && len > 0 {
-                (AppState::SetPin { order, digits, len: len - 1 }, None, None)
+                (AppState::SetPin { order, digits, len: len - 1 }, None, None, None)
             } else {
-                (AppState::SetPin { order, digits, len }, None, None)
+                (AppState::SetPin { order, digits, len }, None, None, None)
             }
         }
 
@@ -147,25 +182,25 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
                     let new_len = len + 1;
                     if new_len == 6 {
                         if d == pin {
-                            (AppState::Home, Some(d), None)
+                            (AppState::Home, Some(d), None, None)
                         } else {
-                            (AppState::PinMismatch, None, None)
+                            (AppState::PinMismatch, None, None, None)
                         }
                     } else {
-                        (AppState::ConfirmPin { pin, order, digits: d, len: new_len }, None, None)
+                        (AppState::ConfirmPin { pin, order, digits: d, len: new_len }, None, None, None)
                     }
                 } else {
-                    (AppState::ConfirmPin { pin, order, digits, len }, None, None)
+                    (AppState::ConfirmPin { pin, order, digits, len }, None, None, None)
                 }
             } else if in_rect(x, y, PIN_DEL_X, PIN_DEL_Y, PIN_DEL_W, PIN_DEL_H) && len > 0 {
-                (AppState::ConfirmPin { pin, order, digits, len: len - 1 }, None, None)
+                (AppState::ConfirmPin { pin, order, digits, len: len - 1 }, None, None, None)
             } else {
-                (AppState::ConfirmPin { pin, order, digits, len }, None, None)
+                (AppState::ConfirmPin { pin, order, digits, len }, None, None, None)
             }
         }
 
         AppState::PinMismatch => {
-            (AppState::SetPin { order: shuffle(seed), digits: [0u8; 6], len: 0 }, None, None)
+            (AppState::SetPin { order: shuffle(seed), digits: [0u8; 6], len: 0 }, None, None, None)
         }
 
         AppState::EnterPin { order, digits, len, gate } => {
@@ -182,52 +217,52 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
                                     order: shuffle(seed), digits: [0u8; 6], len: 0,
                                 },
                             };
-                            (next, None, None)
+                            (next, None, None, None)
                         } else {
                             (AppState::EnterPin {
                                 order: shuffle(seed), digits: [0u8; 6], len: 0, gate,
-                            }, None, None)
+                            }, None, None, None)
                         }
                     } else {
-                        (AppState::EnterPin { order, digits: d, len: new_len, gate }, None, None)
+                        (AppState::EnterPin { order, digits: d, len: new_len, gate }, None, None, None)
                     }
                 } else {
-                    (AppState::EnterPin { order, digits, len, gate }, None, None)
+                    (AppState::EnterPin { order, digits, len, gate }, None, None, None)
                 }
             } else if in_rect(x, y, PIN_DEL_X, PIN_DEL_Y, PIN_DEL_W, PIN_DEL_H) && len > 0 {
-                (AppState::EnterPin { order, digits, len: len - 1, gate }, None, None)
+                (AppState::EnterPin { order, digits, len: len - 1, gate }, None, None, None)
             } else {
-                (AppState::EnterPin { order, digits, len, gate }, None, None)
+                (AppState::EnterPin { order, digits, len, gate }, None, None, None)
             }
         }
 
         AppState::Home => {
             if in_rect(x, y, HOME_X0, HOME_Y0, HOME_BTN_W, HOME_BTN_H) {
-                (AppState::Receive, None, None)
+                (AppState::Receive, None, None, None)
             } else if in_rect(x, y, HOME_X1, HOME_Y0, HOME_BTN_W, HOME_BTN_H) {
-                (AppState::SignScan, None, None)
+                (AppState::SignScan, None, None, None)
             } else if in_rect(x, y, HOME_X0, HOME_Y1, HOME_BTN_W, HOME_BTN_H) {
-                (AppState::Accounts, None, None)
+                (AppState::Accounts, None, None, None)
             } else if in_rect(x, y, HOME_X1, HOME_Y1, HOME_BTN_W, HOME_BTN_H) {
-                (AppState::Settings, None, None)
+                (AppState::Settings, None, None, None)
             } else {
-                (AppState::Home, None, None)
+                (AppState::Home, None, None, None)
             }
         }
 
         AppState::Receive => {
             if in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H) {
-                (AppState::Home, None, None)
+                (AppState::Home, None, None, None)
             } else {
-                (AppState::Receive, None, None)
+                (AppState::Receive, None, None, None)
             }
         }
 
         AppState::Accounts => {
             if in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H) {
-                (AppState::Home, None, None)
+                (AppState::Home, None, None, None)
             } else {
-                (AppState::Accounts, None, None)
+                (AppState::Accounts, None, None, None)
             }
         }
 
@@ -235,74 +270,74 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
             if in_rect(x, y, SETTINGS_BTN_X, SETTINGS_Y0, SETTINGS_BTN_W, SETTINGS_BTN_H) {
                 (AppState::EnterPin {
                     order: shuffle(seed), digits: [0u8; 6], len: 0, gate: PinGate::ShowMnemonic,
-                }, None, None)
+                }, None, None, None)
             } else if in_rect(x, y, SETTINGS_BTN_X, SETTINGS_Y1, SETTINGS_BTN_W, SETTINGS_BTN_H) {
                 (AppState::EnterPin {
                     order: shuffle(seed), digits: [0u8; 6], len: 0, gate: PinGate::ChangePin,
-                }, None, None)
+                }, None, None, None)
             } else if in_rect(x, y, SETTINGS_BTN_X, SETTINGS_Y2, SETTINGS_BTN_W, SETTINGS_BTN_H) {
-                (AppState::About, None, None)
+                (AppState::About, None, None, None)
             } else if in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H) {
-                (AppState::Home, None, None)
+                (AppState::Home, None, None, None)
             } else {
-                (AppState::Settings, None, None)
+                (AppState::Settings, None, None, None)
             }
         }
 
         AppState::ShowMnemonic { page } => {
-            let prev = in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H);
-            let next = in_rect(x, y, NAV_NEXT_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H);
+            let is_prev = in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H);
+            let is_next = in_rect(x, y, NAV_NEXT_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H);
 
-            if next && page < 3 {
-                (AppState::ShowMnemonic { page: page + 1 }, None, None)
-            } else if next && page == 3 {
-                (AppState::Settings, None, None)
-            } else if prev && page > 0 {
-                (AppState::ShowMnemonic { page: page - 1 }, None, None)
-            } else if prev {
-                (AppState::Settings, None, None)
+            if is_next && page < 3 {
+                (AppState::ShowMnemonic { page: page + 1 }, None, None, None)
+            } else if is_next && page == 3 {
+                (AppState::Settings, None, None, None)
+            } else if is_prev && page > 0 {
+                (AppState::ShowMnemonic { page: page - 1 }, None, None, None)
+            } else if is_prev {
+                (AppState::Settings, None, None, None)
             } else {
-                (AppState::ShowMnemonic { page }, None, None)
+                (AppState::ShowMnemonic { page }, None, None, None)
             }
         }
 
         AppState::About => {
             if in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H) {
-                (AppState::Settings, None, None)
+                (AppState::Settings, None, None, None)
             } else {
-                (AppState::About, None, None)
+                (AppState::About, None, None, None)
             }
         }
 
         AppState::SignScan => {
             if in_rect(x, y, SIGN_VF_X, SIGN_VF_Y, SIGN_VF_W, SIGN_VF_H) {
-                (AppState::SignReview, None, None)
+                (AppState::SignReview, None, None, None)
             } else if in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H) {
-                (AppState::Home, None, None)
+                (AppState::Home, None, None, None)
             } else {
-                (AppState::SignScan, None, None)
+                (AppState::SignScan, None, None, None)
             }
         }
 
         AppState::SignReview => {
             if in_rect(x, y, NAV_NEXT_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H) {
-                (AppState::SignResult, None, None)
+                (AppState::SignResult, None, None, None)
             } else if in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H) {
-                (AppState::Home, None, None)
+                (AppState::Home, None, None, None)
             } else {
-                (AppState::SignReview, None, None)
+                (AppState::SignReview, None, None, None)
             }
         }
 
         AppState::SignResult => {
             if in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H) {
-                (AppState::Home, None, None)
+                (AppState::Home, None, None, None)
             } else {
-                (AppState::SignResult, None, None)
+                (AppState::SignResult, None, None, None)
             }
         }
 
-        _ => (state, None, None),
+        _ => (state, None, None, None),
     }
 }
 
@@ -407,12 +442,14 @@ mod tests {
 
     #[test]
     fn welcome_new_wallet_generates_words() {
-        let (event, entropy) = create_touch_event_with_entropy(BTN_X + 1, BTN_NEW_Y + 1, 42);
-        let (state, pin, words) = step(AppState::Welcome, event, None);
+        let (event, event_entropy) = create_touch_event_with_entropy(BTN_X + 1, BTN_NEW_Y + 1, 42);
+        let (state, pin, words, returned_entropy) = step(AppState::Welcome, event, None);
         assert_eq!(state, AppState::NewWallet { page: 0 });
         assert!(pin.is_none());
+        let returned_entropy = returned_entropy.expect("entropy should be returned");
+        assert_eq!(returned_entropy, event_entropy);
         let words = words.expect("words should be generated");
-        assert_eq!(words, generate_words(&entropy));
+        assert_eq!(words, generate_words(&returned_entropy));
         let word_list = bip39::Language::English.word_list();
         for word in &words {
             assert!(word_list.contains(word));
@@ -422,26 +459,27 @@ mod tests {
     #[test]
     fn welcome_restore_wallet() {
         let (event, _) = create_touch_event_with_entropy(BTN_X + 1, BTN_RESTORE_Y + 1, 7);
-        let (state, _, words) = step(AppState::Welcome, event, None);
+        let (state, _, words, entropy) = step(AppState::Welcome, event, None);
         assert_eq!(state, AppState::RestoreWallet);
         assert!(words.is_none());
+        assert!(entropy.is_none());
     }
 
     #[test]
     fn new_wallet_navigation() {
         let (event, _) = create_touch_event_with_entropy(NAV_NEXT_X + 1, NAV_BTN_Y + 1, 1);
-        let (state, _, _) = step(AppState::NewWallet { page: 0 }, event, None);
+        let (state, _, _, _) = step(AppState::NewWallet { page: 0 }, event, None);
         assert_eq!(state, AppState::NewWallet { page: 1 });
 
         let (event, _) = create_touch_event_with_entropy(NAV_NEXT_X + 1, NAV_BTN_Y + 1, 1);
-        let (state, _, _) = step(AppState::NewWallet { page: 3 }, event, None);
+        let (state, _, _, _) = step(AppState::NewWallet { page: 3 }, event, None);
         assert_eq!(state, AppState::EnterPassphrase { buf: [0u8; 32], len: 0 });
     }
 
     #[test]
     fn enter_passphrase_accepts_input_and_skips() {
         let (event, _) = create_touch_event_with_entropy(ROW0_X + 1, ROW0_Y + 1, 9);
-        let (state, _, _) = step(AppState::EnterPassphrase { buf: [0u8; 32], len: 0 }, event, None);
+        let (state, _, _, _) = step(AppState::EnterPassphrase { buf: [0u8; 32], len: 0 }, event, None);
         match state {
             AppState::EnterPassphrase { buf, len } => {
                 assert_eq!(len, 1);
@@ -451,7 +489,7 @@ mod tests {
         }
 
         let (event, _) = create_touch_event_with_entropy(PP_SKIP_X + 1, PP_BTN_Y + 1, 9);
-        let (state, _, _) = step(AppState::EnterPassphrase { buf: [0u8; 32], len: 0 }, event, None);
+        let (state, _, _, _) = step(AppState::EnterPassphrase { buf: [0u8; 32], len: 0 }, event, None);
         match state {
             AppState::SetPin { len, .. } => assert_eq!(len, 0),
             _ => panic!("expected SetPin"),
@@ -462,7 +500,7 @@ mod tests {
     fn passphrase_buffer_limits_input() {
         let buf = [b'A'; 32];
         let (event, _) = create_touch_event_with_entropy(ROW0_X + 1, ROW0_Y + 1, 10);
-        let (state, _, _) = step(AppState::EnterPassphrase { buf, len: 32 }, event, None);
+        let (state, _, _, _) = step(AppState::EnterPassphrase { buf, len: 32 }, event, None);
         match state {
             AppState::EnterPassphrase { buf: next_buf, len } => {
                 assert_eq!(len, 32);
@@ -494,7 +532,7 @@ mod tests {
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
             let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 3);
-            let (next_state, new_pin, _) = step(state, event, None);
+            let (next_state, new_pin, _, _) = step(state, event, None);
             state = next_state;
             result_pin = result_pin.or(new_pin);
         }
@@ -531,7 +569,7 @@ mod tests {
         assert_eq!(state, AppState::PinMismatch);
 
         let (event, _) = create_touch_event_with_entropy(0, 0, 4);
-        let (state, _, _) = step(state, event, None);
+        let (state, _, _, _) = step(state, event, None);
         match state {
             AppState::SetPin { len, .. } => assert_eq!(len, 0),
             _ => panic!("expected SetPin"),
