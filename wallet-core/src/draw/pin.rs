@@ -8,7 +8,7 @@ use embedded_graphics::text::{Alignment::Center, Text};
 
 use crate::layout::*;
 use crate::state::pin_key_pos;
-use super::{draw_button, white_stroke, white_text};
+use super::{draw_button, white_stroke, white_text, dim_text};
 
 pub fn draw<D>(display: &mut D, order: &[u8; 10], len: u8, confirm: bool) -> Result<(), D::Error>
 where
@@ -63,6 +63,33 @@ where
         .draw(display)?;
     Text::with_alignment("Tap anywhere to retry", Point::new(SCREEN_W / 2, SCREEN_H / 2 + 20), small, Center)
         .draw(display)?;
+
+    Ok(())
+}
+
+pub fn draw_locked<D>(display: &mut D) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let red   = MonoTextStyle::new(&FONT_10X20, Rgb565::RED);
+    let small = MonoTextStyle::new(&FONT_6X10, Rgb565::new(20, 40, 20));
+
+    Text::with_alignment("Device locked", Point::new(SCREEN_W / 2, SCREEN_H / 2 - 40), red, Center)
+        .draw(display)?;
+    Text::with_alignment(
+        "Too many wrong PIN attempts.",
+        Point::new(SCREEN_W / 2, SCREEN_H / 2),
+        dim_text(),
+        Center,
+    )
+    .draw(display)?;
+    Text::with_alignment(
+        "Restart the device to try again.",
+        Point::new(SCREEN_W / 2, SCREEN_H / 2 + 30),
+        small,
+        Center,
+    )
+    .draw(display)?;
 
     Ok(())
 }

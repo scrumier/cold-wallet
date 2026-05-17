@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-wallet-core = { path = "../wallet-core" }
+wallet-core = { path = "../wallet-core", features = ["std"] }
 embedded-graphics = { workspace = true }
 embedded-graphics-simulator = "0.8.0"
 bip39 = { workspace = true }
+getrandom = "0.2"
+bitcoin_hashes = { workspace = true }
+k256 = { workspace = true }

@@ -19,6 +19,7 @@ use embedded_graphics::mono_font::{ascii::FONT_10X20, MonoTextStyle};
 use embedded_graphics::primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
 use embedded_graphics::text::{Alignment::Center, Text};
 
+use crate::psbt::ParsedPsbt;
 use crate::state::AppState;
 
 pub fn draw_ui<D>(
@@ -26,6 +27,8 @@ pub fn draw_ui<D>(
     state: AppState,
     words: &[&'static str; 24],
     address: Option<&str>,
+    psbt: Option<&ParsedPsbt>,
+    signed_b64: Option<&str>,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
@@ -39,6 +42,7 @@ where
         AppState::SetPin { order, len, .. }        => pin::draw(display, &order, len, false)?,
         AppState::ConfirmPin { order, len, .. }    => pin::draw(display, &order, len, true)?,
         AppState::PinMismatch                      => pin::draw_mismatch(display)?,
+        AppState::PinLocked                        => pin::draw_locked(display)?,
         AppState::EnterPin { order, len, .. }      => pin::draw(display, &order, len, false)?,
         AppState::RestoreWallet { word_idx, buf, buf_len, error, .. }
                                                    => restore::draw(display, word_idx, &buf, buf_len, error)?,
@@ -49,8 +53,8 @@ where
         AppState::ShowMnemonic { page }            => mnemonic::draw(display, page, words)?,
         AppState::About                            => about::draw(display)?,
         AppState::SignScan                         => sign_scan::draw(display)?,
-        AppState::SignReview                       => sign_review::draw(display)?,
-        AppState::SignResult                       => sign_result::draw(display)?,
+        AppState::SignReview                       => sign_review::draw(display, psbt)?,
+        AppState::SignResult                       => sign_result::draw(display, signed_b64)?,
         _                                          => draw_placeholder(display, state)?,
     }
 

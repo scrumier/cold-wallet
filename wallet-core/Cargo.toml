@@ -3,9 +3,15 @@ name = "wallet-core"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Enables QR code rendering. Requires std (the qrcode crate uses Vec internally).
+# Enable this in wallet-sim and in wallet-h747 once it has a global allocator.
+std = ["dep:qrcode"]
+
 [dependencies]
 embedded-graphics  = { workspace = true }
 bip39             = { workspace = true }
 bip32             = { workspace = true }
 k256              = { workspace = true }
 bitcoin_hashes    = { workspace = true }
+qrcode            = { workspace = true, optional = true }

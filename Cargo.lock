@@ -342,6 +342,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "getrandom"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "wasi",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -399,6 +410,7 @@ dependencies = [
  "ecdsa",
  "elliptic-curve",
  "sha2",
+ "signature",
 ]
 
 [[package]]
@@ -515,6 +527,12 @@ checksum = "7186d3822593aa4393561d186d1393b3923e9d6163d3fbfd6e825e3e6cf3e6a8"
 dependencies = [
  "num-traits",
 ]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quote"
@@ -669,6 +687,7 @@ dependencies = [
  "bitcoin_hashes 0.20.0",
  "embedded-graphics",
  "k256",
+ "qrcode",
 ]
 
 [[package]]
@@ -676,10 +695,19 @@ name = "wallet-sim"
 version = "0.1.0"
 dependencies = [
  "bip39",
+ "bitcoin_hashes 0.20.0",
  "embedded-graphics",
  "embedded-graphics-simulator",
+ "getrandom",
+ "k256",
  "wallet-core",
 ]
+
+[[package]]
+name = "wasi"
+version = "0.11.1+wasi-snapshot-preview1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "yansi"

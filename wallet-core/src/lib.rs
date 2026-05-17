@@ -1,9 +1,13 @@
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
+mod base64;
 mod derive;
 mod draw;
 mod keyboard;
 mod layout;
+mod psbt;
+mod sighash;
+mod signing;
 mod state;
 
 use embedded_graphics::pixelcolor::Rgb565;
@@ -20,5 +24,7 @@ where
         wallet.get_state(),
         wallet.mnemonic_words(),
         wallet.receive_address(),
+        wallet.current_psbt(),
+        wallet.signed_psbt_b64(),
     )
 }

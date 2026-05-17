@@ -20,18 +20,20 @@ where
     let num_t = MonoTextStyle::new(&FONT_6X10, Rgb565::new(20, 40, 20));
 
     let page_labels = ["Page 1 / 4", "Page 2 / 4", "Page 3 / 4", "Page 4 / 4"];
-    Text::with_alignment(page_labels[page as usize], Point::new(SCREEN_W / 2, 30), num_t, Center)
+    let page_label = page_labels.get(page as usize).copied().unwrap_or("Page ? / 4");
+    Text::with_alignment(page_label, Point::new(SCREEN_W / 2, 30), num_t, Center)
         .draw(display)?;
 
-    let start = (page as usize) * 6;
+    let start = (page as usize).min(3) * 6;
     for i in 0..6 {
         let idx   = start + i;
         let row_y = 60 + (i as i32) * 58;
 
         let mut num_buf = [0u8; 4];
+        let word = words.get(idx).copied().unwrap_or("—");
         Text::new(fmt_u8(idx as u8 + 1, &mut num_buf), Point::new(80, row_y + 15), num_t)
             .draw(display)?;
-        Text::new(words[idx], Point::new(120, row_y + 15), white_text()).draw(display)?;
+        Text::new(word, Point::new(120, row_y + 15), white_text()).draw(display)?;
 
         Rectangle::new(Point::new(80, row_y + 40), Size::new(640, 1))
             .into_styled(PrimitiveStyleBuilder::new().fill_color(Rgb565::new(6, 12, 6)).build())

@@ -23,6 +23,23 @@ pub fn taproot_address(seed: &[u8; 64]) -> Option<[u8; 62]> {
     Some(p2tr_mainnet(&output_key))
 }
 
+/// Returns `(x_only_internal_key, raw_private_key_bytes)` for the BIP86 path.
+///
+/// Used by the signing module to construct the tweaked signing key.
+pub fn tap_keypair(seed: &[u8; 64]) -> Option<([u8; 32], [u8; 32])> {
+    let mut xprv = XPrv::new(seed).ok()?;
+    for &(idx, hardened) in &[(86u32, true), (0, true), (0, true), (0, false), (0, false)] {
+        let cn = ChildNumber::new(idx, hardened).ok()?;
+        xprv = xprv.derive_child(cn).ok()?;
+    }
+    let privkey_bytes: [u8; 32] = xprv.private_key().to_bytes().into();
+    // Derive x_only from the same child xprv — avoids a redundant second derivation from seed.
+    let compressed = xprv.public_key().public_key().to_encoded_point(true);
+    let mut x_only = [0u8; 32];
+    x_only.copy_from_slice(&compressed.as_bytes()[1..]);
+    Some((x_only, privkey_bytes))
+}
+
 // ── Internal key derivation ──────────────────────────────────────────────────
 
 fn derive_x_only(seed: &[u8; 64]) -> Option<[u8; 32]> {
@@ -42,6 +59,13 @@ fn derive_x_only(seed: &[u8; 64]) -> Option<[u8; 32]> {
 }
 
 // ── BIP341 keypath-only taproot tweak ────────────────────────────────────────
+
+/// Computes the tweaked output key Q = P + H_TapTweak(P)·G (public, x-only).
+/// Used by tests and the PSBT builder to construct P2TR scriptPubKeys.
+#[allow(dead_code)]
+pub fn taproot_tweak_pub(internal_key: &[u8; 32]) -> Option<[u8; 32]> {
+    taproot_tweak(internal_key)
+}
 
 // Q = P + H_TapTweak(P)·G
 // where H_tag(m) = SHA256(SHA256(tag) ‖ SHA256(tag) ‖ m)
