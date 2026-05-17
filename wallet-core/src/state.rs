@@ -112,6 +112,37 @@ impl ColdWallet {
     /// Returns the currently loaded PSBT, if any.
     pub fn current_psbt(&self) -> Option<&ParsedPsbt> { self.psbt.as_ref() }
 
+    /// Snapshot the wallet for disk persistence (simulator only).
+    /// Returns `None` if the wallet has not yet completed setup (no PIN, no seed).
+    pub fn to_persisted(&self) -> Option<crate::storage::PersistedWallet> {
+        let pin = self.pin?;
+        if self.entropy == [0u8; 32] || self.seed == [0u8; 64] { return None; }
+        Some(crate::storage::PersistedWallet { entropy: self.entropy, seed: self.seed, pin })
+    }
+
+    /// Restore a wallet from persisted state, starting at the PIN-unlock screen.
+    /// `entropy` is fresh platform entropy used to shuffle the PIN pad.
+    pub fn from_persisted(p: crate::storage::PersistedWallet, entropy: [u8; 32]) -> Self {
+        let seed_u32 = u32::from_le_bytes([entropy[0], entropy[1], entropy[2], entropy[3]]);
+        let address  = crate::derive::taproot_address(&p.seed).unwrap_or([0u8; 62]);
+        let words    = generate_words(&p.entropy);
+        Self {
+            state: AppState::EnterPin {
+                order: shuffle(seed_u32),
+                digits: [0u8; 6], len: 0,
+                gate: PinGate::Unlock, failures: 0,
+            },
+            pin:                 Some(p.pin),
+            words,
+            entropy:             p.entropy,
+            seed:                p.seed,
+            address,
+            psbt:                None,
+            signed_psbt_b64:     [0u8; MAX_SIGNED_B64],
+            signed_psbt_b64_len: 0,
+        }
+    }
+
     /// Returns the signed PSBT as a Base64 string, if signing has completed.
     pub fn signed_psbt_b64(&self) -> Option<&str> {
         if self.signed_psbt_b64_len > 0 {

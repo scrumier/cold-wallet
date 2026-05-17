@@ -1,10 +1,12 @@
+use std::path::PathBuf;
+
 use embedded_graphics::geometry::Size;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics_simulator::{
     OutputSettingsBuilder, SimulatorDisplay, SimulatorEvent, Window,
     sdl2::MouseButton,
 };
-use wallet_core::{draw_ui, AppState, ColdWallet, WalletEvent};
+use wallet_core::{draw_ui, AppState, ColdWallet, PersistedWallet, PERSIST_BYTES, WalletEvent};
 
 // Viewfinder hit area — matches layout::SIGN_VF_* constants.
 const VF_X: i32 = 200; // (800 - 400) / 2
@@ -235,9 +237,31 @@ fn in_rect(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
     x >= rx && x < rx + rw && y >= ry && y < ry + rh
 }
 
+fn wallet_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".config").join("cold-wallet").join("wallet.bin")
+}
+
+fn load_wallet() -> Option<PersistedWallet> {
+    let bytes: [u8; PERSIST_BYTES] = std::fs::read(wallet_path()).ok()?.try_into().ok()?;
+    PersistedWallet::from_bytes(&bytes)
+}
+
+fn save_wallet(p: &PersistedWallet) {
+    let path = wallet_path();
+    if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
+    let _ = std::fs::write(&path, p.to_bytes());
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut display = SimulatorDisplay::<Rgb565>::new(Size::new(SCREEN_WIDTH, SCREEN_HEIGHT));
-    let mut wallet  = ColdWallet::new();
+    let mut wallet = match load_wallet() {
+        Some(persisted) => {
+            println!("[WALLET] Persisted wallet found — resuming at PIN unlock");
+            ColdWallet::from_persisted(persisted, entropy())
+        }
+        None => ColdWallet::new(),
+    };
 
     let output_settings = OutputSettingsBuilder::new().scale(1).build();
     let mut window = Window::new("Cold Wallet — Simulator", &output_settings);
@@ -273,6 +297,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let after = wallet.get_state();
                     if before != after {
                         log_transition(before, after);
+                        // Persist after PIN is confirmed — wallet is fully set up.
+                        if matches!(before, AppState::ConfirmPin { .. })
+                            && matches!(after, AppState::Home)
+                        {
+                            if let Some(ref p) = wallet.to_persisted() {
+                                save_wallet(p);
+                                println!("[WALLET] Wallet saved to {}", wallet_path().display());
+                            }
+                        }
                         draw_ui(&mut display, &wallet)?;
                     }
                 }
