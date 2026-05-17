@@ -32,11 +32,22 @@ pub fn tap_keypair(seed: &[u8; 64]) -> Option<([u8; 32], [u8; 32])> {
         let cn = ChildNumber::new(idx, hardened).ok()?;
         xprv = xprv.derive_child(cn).ok()?;
     }
-    let privkey_bytes: [u8; 32] = xprv.private_key().to_bytes().into();
-    // Derive x_only from the same child xprv — avoids a redundant second derivation from seed.
+    let raw_privkey: [u8; 32] = xprv.private_key().to_bytes().into();
     let compressed = xprv.public_key().public_key().to_encoded_point(true);
     let mut x_only = [0u8; 32];
     x_only.copy_from_slice(&compressed.as_bytes()[1..]);
+
+    // BIP340: the internal key is always lift_x(P) = even-y point.
+    // If d*G has odd y, negate d so the returned private key corresponds to even-y P.
+    // taproot_tweak_pub assumes even-y; signing and verification must agree.
+    let privkey_bytes: [u8; 32] = if compressed.as_bytes()[0] == 0x03 {
+        let d: Option<Scalar> = Scalar::from_repr(raw_privkey.into()).into();
+        let d = d?;
+        (-d).to_repr().into()
+    } else {
+        raw_privkey
+    };
+
     Some((x_only, privkey_bytes))
 }
 

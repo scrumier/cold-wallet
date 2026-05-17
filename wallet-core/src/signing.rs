@@ -148,6 +148,34 @@ mod tests {
     }
 
     #[test]
+    fn sign_then_verify() {
+        // Signs a PSBT then verifies the BIP340 Schnorr signature with k256's
+        // own verifier — proves the full crypto pipeline is mathematically consistent
+        // without any network or external tool.
+        use k256::schnorr::VerifyingKey;
+
+        let seed = test_seed();
+        let (internal_key, _) = tap_keypair(&seed).unwrap();
+
+        // Tweaked output key — this is what goes in the P2TR scriptPubKey.
+        let output_key = crate::derive::taproot_tweak_pub(&internal_key).unwrap();
+        let vk = VerifyingKey::from_bytes(&output_key).unwrap();
+
+        // Capture the sighash before sign_psbt mutates the PSBT.
+        let mut psbt = make_test_psbt(&seed);
+        let sighash = crate::sighash::taproot_sighash(&psbt, 0);
+        sign_psbt(&mut psbt, &seed, &[0u8; 32]).unwrap();
+
+        let sig_bytes = psbt.inputs[0].tap_key_sig.unwrap();
+        let sig = k256::schnorr::Signature::try_from(sig_bytes.as_ref()).unwrap();
+
+        // verify_raw: sighash is the BIP340 message (already hashed by taproot_sighash).
+        // Must match sign_prehash_with_aux_rand which also treats the input as pre-hashed.
+        vk.verify_raw(&sighash, &sig)
+            .expect("BIP340 Schnorr signature failed to verify against tweaked pubkey");
+    }
+
+    #[test]
     fn rejects_mismatched_internal_key() {
         let seed = test_seed();
         let mut psbt = make_test_psbt(&seed);
