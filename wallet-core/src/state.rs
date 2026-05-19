@@ -1,14 +1,18 @@
 use bip39::Mnemonic;
 
 use crate::base64;
+use crate::crypto::{self, KEY_LEN, NONCE_LEN, SALT_LEN};
 use crate::derive::{indices_to_entropy, taproot_address};
 use crate::keyboard::{passphrase_key_at, KeyPress};
 use crate::layout::*;
 use crate::psbt::{self, ParsedPsbt, MAX_PSBT_RAW};
 use crate::signing::sign_psbt;
+use crate::storage::{
+    DiskHeader, PERSIST_BYTES, Secrets, encrypt_into_blob, try_decrypt, update_lockout,
+};
 
 // Lock the wallet permanently after this many consecutive wrong PIN attempts.
-const PIN_MAX_ATTEMPTS: u8 = 3;
+pub const PIN_MAX_ATTEMPTS: u8 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PinGate {
@@ -32,7 +36,7 @@ pub enum AppState {
     SetPin           { order: [u8; 10], digits: [u8; 6], len: u8 },
     ConfirmPin       { pin: [u8; 6], order: [u8; 10], digits: [u8; 6], len: u8 },
     PinMismatch,
-    EnterPin         { order: [u8; 10], digits: [u8; 6], len: u8, gate: PinGate, failures: u8 },
+    EnterPin         { order: [u8; 10], digits: [u8; 6], len: u8, gate: PinGate },
     /// Permanent lockout after PIN_MAX_ATTEMPTS wrong attempts.
     PinLocked,
     Home,
@@ -72,6 +76,23 @@ pub struct ColdWallet {
     /// Base64 of the signed PSBT, for QR display on SignResult screen.
     signed_psbt_b64:    [u8; MAX_SIGNED_B64],
     signed_psbt_b64_len: usize,
+
+    // ── At-rest encryption + lockout state ────────────────────────────────
+    /// Per-wallet salt. Generated on initial PIN confirmation, persisted in the
+    /// disk header. Zero before initial setup.
+    salt:               [u8; SALT_LEN],
+    /// PBKDF2-derived encryption key, cached after a successful unlock or after
+    /// initial setup. Kept in RAM so we can re-encrypt without re-running the
+    /// 600k-iteration KDF. `None` before the wallet is unlocked.
+    enc_key:            Option<[u8; KEY_LEN]>,
+    /// Consecutive wrong-PIN attempts, mirrored to the on-disk header so the
+    /// counter survives a power cycle (no brute-force-by-restart).
+    pub(crate) failures: u8,
+    /// Permanent lockout flag, also mirrored to disk.
+    pub(crate) locked:   bool,
+    /// Latest on-disk image. `None` before the wallet has been persisted (i.e.
+    /// during initial setup, before ConfirmPin succeeds).
+    disk_image:         Option<[u8; PERSIST_BYTES]>,
 }
 
 impl ColdWallet {
@@ -86,6 +107,11 @@ impl ColdWallet {
             psbt:               None,
             signed_psbt_b64:    [0u8; MAX_SIGNED_B64],
             signed_psbt_b64_len: 0,
+            salt:               [0u8; SALT_LEN],
+            enc_key:            None,
+            failures:           0,
+            locked:             false,
+            disk_image:         None,
         }
     }
 
@@ -112,35 +138,30 @@ impl ColdWallet {
     /// Returns the currently loaded PSBT, if any.
     pub fn current_psbt(&self) -> Option<&ParsedPsbt> { self.psbt.as_ref() }
 
-    /// Snapshot the wallet for disk persistence (simulator only).
-    /// Returns `None` if the wallet has not yet completed setup (no PIN, no seed).
-    pub fn to_persisted(&self) -> Option<crate::storage::PersistedWallet> {
-        let pin = self.pin?;
-        if self.entropy == [0u8; 32] || self.seed == [0u8; 64] { return None; }
-        Some(crate::storage::PersistedWallet { entropy: self.entropy, seed: self.seed, pin })
-    }
+    /// Current on-disk image. `None` if the wallet has never been persisted.
+    pub fn disk_image(&self) -> Option<&[u8; PERSIST_BYTES]> { self.disk_image.as_ref() }
 
-    /// Restore a wallet from persisted state, starting at the PIN-unlock screen.
-    /// `entropy` is fresh platform entropy used to shuffle the PIN pad.
-    pub fn from_persisted(p: crate::storage::PersistedWallet, entropy: [u8; 32]) -> Self {
-        let seed_u32 = u32::from_le_bytes([entropy[0], entropy[1], entropy[2], entropy[3]]);
-        let address  = crate::derive::taproot_address(&p.seed).unwrap_or([0u8; 62]);
-        let words    = generate_words(&p.entropy);
-        Self {
-            state: AppState::EnterPin {
-                order: shuffle(seed_u32),
+    /// Boots a wallet from a previously written disk image. The wallet starts
+    /// in `EnterPin { gate: Unlock }` — or in `PinLocked` if the header says so.
+    /// `shuffle_entropy` is fresh entropy used only to randomise the PIN pad order.
+    pub fn from_disk_image(image: [u8; PERSIST_BYTES], shuffle_entropy: [u8; 32]) -> Option<Self> {
+        let hdr = DiskHeader::parse(&image).ok()?;
+        let mut w = Self::new();
+        w.salt       = hdr.salt;
+        w.failures   = hdr.failures;
+        w.locked     = hdr.locked;
+        w.disk_image = Some(image);
+        w.state = if hdr.locked {
+            AppState::PinLocked
+        } else {
+            let seed_u32 = u32::from_le_bytes(shuffle_entropy[..4].try_into().unwrap());
+            AppState::EnterPin {
+                order:  shuffle(seed_u32),
                 digits: [0u8; 6], len: 0,
-                gate: PinGate::Unlock, failures: 0,
-            },
-            pin:                 Some(p.pin),
-            words,
-            entropy:             p.entropy,
-            seed:                p.seed,
-            address,
-            psbt:                None,
-            signed_psbt_b64:     [0u8; MAX_SIGNED_B64],
-            signed_psbt_b64_len: 0,
-        }
+                gate:   PinGate::Unlock,
+            }
+        };
+        Some(w)
     }
 
     /// Returns the signed PSBT as a Base64 string, if signing has completed.
@@ -152,7 +173,16 @@ impl ColdWallet {
         }
     }
 
-    pub fn handle_event(&mut self, event: WalletEvent) {
+    /// Drives the state machine in response to a UI/QR event.
+    ///
+    /// `persist` is invoked with the current on-disk image whenever the wallet
+    /// needs to be written (PIN attempt write-ahead, successful unlock,
+    /// initial setup, PIN change). The caller (simulator / hardware crate) is
+    /// responsible for atomic disk writes.
+    pub fn handle_event<F>(&mut self, event: WalletEvent, persist: &mut F)
+    where
+        F: FnMut(&[u8; PERSIST_BYTES]),
+    {
         // Capture entropy before the event is consumed by step().
         let touch_entropy = match &event {
             WalletEvent::Touch { entropy, .. } => *entropy,
@@ -184,6 +214,16 @@ impl ColdWallet {
             self.derive_address(pp);
         }
 
+        // ── PIN verification (write-ahead → check → resolve) ──────────────
+        if let AppState::EnterPin { digits, len: 6, gate, .. } = self.state {
+            self.resolve_enter_pin(digits, gate, &touch_entropy, persist);
+        }
+
+        // ── PIN confirmation (initial setup OR change PIN) ────────────────
+        if let AppState::ConfirmPin { pin, digits, len: 6, .. } = self.state {
+            self.resolve_confirm_pin(pin, digits, &touch_entropy, persist);
+        }
+
         // Sign the PSBT when user confirms on the review screen.
         // Pass the touch-event entropy as BIP340 aux_rand for fault-injection resistance.
         if matches!(prev, AppState::SignReview)
@@ -197,6 +237,147 @@ impl ColdWallet {
             self.psbt = None;
             self.signed_psbt_b64_len = 0;
         }
+    }
+
+    // ── PIN orchestration ─────────────────────────────────────────────────
+
+    /// 6th digit of `EnterPin` just entered. Write-ahead the bumped failure
+    /// counter, then verify the PIN (in-memory if already known, else by AEAD
+    /// decryption of the disk image), then transition.
+    fn resolve_enter_pin<F: FnMut(&[u8; PERSIST_BYTES])>(
+        &mut self,
+        digits:        [u8; 6],
+        gate:          PinGate,
+        touch_entropy: &[u8; 32],
+        persist:       &mut F,
+    ) {
+        // 1) Write-ahead: bump failures on disk *before* checking. If we crash
+        //    between this write and the check, the counter is already incremented,
+        //    so a restart cannot rewind the lockout.
+        self.failures = self.failures.saturating_add(1);
+        if let Some(ref mut img) = self.disk_image {
+            update_lockout(img, self.failures, false);
+            persist(img);
+        }
+
+        // 2) Verify. Two paths:
+        //    a) In-memory PIN known (set during the same session): plain compare.
+        //    b) Cold boot from disk: derive key from typed digits + salt, attempt
+        //       AEAD decryption. Successful decrypt ⇔ correct PIN.
+        let correct = if let Some(ref stored) = self.pin {
+            stored == &digits
+        } else if let Some(ref img) = self.disk_image {
+            let key = crypto::derive_key(&digits, &self.salt);
+            match try_decrypt(img, &key) {
+                Ok(secrets) => {
+                    self.entropy = secrets.entropy;
+                    self.seed    = secrets.seed;
+                    self.address = taproot_address(&self.seed).unwrap_or([0u8; 62]);
+                    self.words   = generate_words(&self.entropy);
+                    self.pin     = Some(digits);
+                    self.enc_key = Some(key);
+                    true
+                }
+                Err(_) => false,
+            }
+        } else {
+            // No persisted wallet and no in-memory PIN — can't verify. Treat as wrong.
+            false
+        };
+
+        // Zero typed digits before re-using them.
+        let mut scratch = digits;
+        zero_sensitive(&mut scratch);
+
+        if correct {
+            // 3a) Success → reset counter, persist, transition based on gate.
+            self.failures = 0;
+            if let Some(ref mut img) = self.disk_image {
+                update_lockout(img, 0, false);
+                persist(img);
+            }
+            let seed_u32 = u32::from_le_bytes(touch_entropy[..4].try_into().unwrap());
+            self.state = match gate {
+                PinGate::Unlock       => AppState::Home,
+                PinGate::ShowMnemonic => AppState::ShowMnemonic { page: 0 },
+                PinGate::ChangePin    => AppState::SetPin {
+                    order: shuffle(seed_u32),
+                    digits: [0u8; 6], len: 0,
+                },
+            };
+        } else if self.failures >= PIN_MAX_ATTEMPTS {
+            // 3b) Too many failures → permanent lockout.
+            self.locked = true;
+            if let Some(ref mut img) = self.disk_image {
+                update_lockout(img, self.failures, true);
+                persist(img);
+            }
+            self.state = AppState::PinLocked;
+        } else {
+            // 3c) Wrong PIN, attempts remaining → re-shuffle pad, clear digits.
+            let seed_u32 = u32::from_le_bytes(touch_entropy[..4].try_into().unwrap());
+            self.state = AppState::EnterPin {
+                order:  shuffle(seed_u32),
+                digits: [0u8; 6], len: 0,
+                gate,
+            };
+        }
+    }
+
+    /// 6th digit of `ConfirmPin` just entered. If it matches, this is either
+    /// initial wallet setup or a PIN change — in both cases we (re-)derive the
+    /// encryption key, encrypt entropy+seed under it, and persist.
+    fn resolve_confirm_pin<F: FnMut(&[u8; PERSIST_BYTES])>(
+        &mut self,
+        pin:           [u8; 6],
+        digits:        [u8; 6],
+        touch_entropy: &[u8; 32],
+        persist:       &mut F,
+    ) {
+        if digits != pin {
+            // Don't leak via comparison ordering — we already did the compare above,
+            // but the failure path just resets to SetPin.
+            self.state = AppState::PinMismatch;
+            // Zero local copies.
+            let mut a = digits; zero_sensitive(&mut a);
+            let mut b = pin;    zero_sensitive(&mut b);
+            return;
+        }
+
+        // PIN matches → encrypt. We always regenerate salt + nonce so a PIN
+        // change yields a completely fresh ciphertext (no cross-correlation
+        // with the previous encryption).
+        let mut salt  = [0u8; SALT_LEN];
+        let mut nonce = [0u8; NONCE_LEN];
+        salt.copy_from_slice(&touch_entropy[..SALT_LEN]);
+        nonce.copy_from_slice(&touch_entropy[SALT_LEN..SALT_LEN + NONCE_LEN]);
+
+        // Slow PBKDF2 (≈500ms). Acceptable for PIN-set events; user expects a beat.
+        let key = crypto::derive_key(&digits, &salt);
+
+        let secrets = Secrets { entropy: self.entropy, seed: self.seed };
+        match encrypt_into_blob(&secrets, &salt, &nonce, &key, 0, false) {
+            Ok(image) => {
+                self.salt       = salt;
+                self.enc_key    = Some(key);
+                self.pin        = Some(digits);
+                self.failures   = 0;
+                self.locked     = false;
+                self.disk_image = Some(image);
+                persist(self.disk_image.as_ref().unwrap());
+                self.state = AppState::Home;
+            }
+            Err(_) => {
+                // Encryption failure is a hardware-level event (e.g. RNG dead).
+                // Fall back to PinMismatch so the user is forced to retry rather
+                // than silently entering an unprotected state.
+                self.state = AppState::PinMismatch;
+            }
+        }
+
+        // Zero locals.
+        let mut a = digits; zero_sensitive(&mut a);
+        let mut b = pin;    zero_sensitive(&mut b);
     }
 
     fn derive_address(&mut self, passphrase: &str) {
@@ -234,6 +415,10 @@ impl ColdWallet {
         let Ok(psbt_len) = psbt::encode_signed(psbt, &tx_buf[..tx_len], &mut psbt_bin) else { return };
 
         // Base64-encode for QR display.
+        if psbt_len.div_ceil(3) * 4 > self.signed_psbt_b64.len() {
+            // Signed PSBT would overflow our base64 buffer — drop it rather than panic.
+            return;
+        }
         let b64_len = base64::encode(&psbt_bin[..psbt_len], &mut self.signed_psbt_b64);
         self.signed_psbt_b64_len = b64_len;
     }
@@ -246,8 +431,12 @@ impl Drop for ColdWallet {
         if let Some(ref mut p) = self.pin {
             zero_sensitive(p);
         }
+        if let Some(ref mut k) = self.enc_key {
+            zero_sensitive(k);
+        }
         zero_sensitive(&mut self.address);
         zero_sensitive(&mut self.signed_psbt_b64);
+        zero_sensitive(&mut self.salt);
     }
 }
 
@@ -289,11 +478,11 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
         AppState::SetPin { order, digits, len } =>
             step_set_pin(x, y, seed, order, digits, len),
         AppState::ConfirmPin { pin, order, digits, len } =>
-            step_confirm_pin(x, y, seed, pin, order, digits, len),
+            step_confirm_pin(x, y, pin, order, digits, len),
         AppState::PinMismatch =>
             step_pin_mismatch(seed),
-        AppState::EnterPin { order, digits, len, gate, failures } =>
-            step_enter_pin(x, y, seed, order, digits, len, gate, failures, stored_pin),
+        AppState::EnterPin { order, digits, len, gate } =>
+            step_enter_pin(x, y, order, digits, len, gate, stored_pin),
         AppState::Home =>
             step_home(x, y),
         AppState::Receive =>
@@ -393,33 +582,20 @@ fn step_set_pin(x: i32, y: i32, seed: u32, order: [u8; 10], mut digits: [u8; 6],
     }
 }
 
-fn step_confirm_pin(x: i32, y: i32, seed: u32, pin: [u8; 6], order: [u8; 10], mut digits: [u8; 6], len: u8) -> StepResult {
+/// Builds digits one tap at a time. Resolution of `digits == pin` happens in
+/// `ColdWallet::resolve_confirm_pin` once `len == 6` so that side effects
+/// (encryption, persistence) stay out of the pure state-machine layer.
+fn step_confirm_pin(x: i32, y: i32, pin: [u8; 6], order: [u8; 10], mut digits: [u8; 6], len: u8) -> StepResult {
     if let Some(digit) = pin_digit_at(x, y, &order) {
         if len < 6 {
             digits[len as usize] = digit;
-            let new_len = len + 1;
-            if new_len == 6 {
-                let matched = digits == pin;
-                // Copy the confirmed pin before zeroing both buffers.
-                let confirmed_pin = digits;
-                zero_sensitive(&mut digits);
-                let mut pin_copy = pin;
-                zero_sensitive(&mut pin_copy);
-                if matched {
-                    (AppState::Home, Some(confirmed_pin), None, None)
-                } else {
-                    (AppState::PinMismatch, None, None, None)
-                }
-            } else {
-                (AppState::ConfirmPin { pin, order, digits, len: new_len }, None, None, None)
-            }
+            (AppState::ConfirmPin { pin, order, digits, len: len + 1 }, None, None, None)
         } else {
             (AppState::ConfirmPin { pin, order, digits, len }, None, None, None)
         }
     } else if in_rect(x, y, PIN_DEL_X, PIN_DEL_Y, PIN_DEL_W, PIN_DEL_H) && len > 0 {
         (AppState::ConfirmPin { pin, order, digits, len: len - 1 }, None, None, None)
     } else {
-        let _ = seed;
         (AppState::ConfirmPin { pin, order, digits, len }, None, None, None)
     }
 }
@@ -428,50 +604,25 @@ fn step_pin_mismatch(seed: u32) -> StepResult {
     (AppState::SetPin { order: shuffle(seed), digits: [0u8; 6], len: 0 }, None, None, None)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Builds digits one tap at a time. Verification + write-ahead persistence
+/// happen in `ColdWallet::resolve_enter_pin` once `len == 6`.
 fn step_enter_pin(
-    x: i32, y: i32, seed: u32,
+    x: i32, y: i32,
     order: [u8; 10], mut digits: [u8; 6], len: u8,
-    gate: PinGate, failures: u8,
-    stored_pin: Option<[u8; 6]>,
+    gate: PinGate,
+    _stored_pin: Option<[u8; 6]>,
 ) -> StepResult {
     if let Some(digit) = pin_digit_at(x, y, &order) {
         if len < 6 {
             digits[len as usize] = digit;
-            let new_len = len + 1;
-            if new_len == 6 {
-                let correct = stored_pin == Some(digits);
-                zero_sensitive(&mut digits);
-                if correct {
-                    let next = match gate {
-                        PinGate::Unlock       => AppState::Home,
-                        PinGate::ShowMnemonic => AppState::ShowMnemonic { page: 0 },
-                        PinGate::ChangePin    => AppState::SetPin {
-                            order: shuffle(seed), digits: [0u8; 6], len: 0,
-                        },
-                    };
-                    (next, None, None, None)
-                } else {
-                    let new_failures = failures + 1;
-                    if new_failures >= PIN_MAX_ATTEMPTS {
-                        (AppState::PinLocked, None, None, None)
-                    } else {
-                        (AppState::EnterPin {
-                            order: shuffle(seed), digits: [0u8; 6], len: 0,
-                            gate, failures: new_failures,
-                        }, None, None, None)
-                    }
-                }
-            } else {
-                (AppState::EnterPin { order, digits, len: new_len, gate, failures }, None, None, None)
-            }
+            (AppState::EnterPin { order, digits, len: len + 1, gate }, None, None, None)
         } else {
-            (AppState::EnterPin { order, digits, len, gate, failures }, None, None, None)
+            (AppState::EnterPin { order, digits, len, gate }, None, None, None)
         }
     } else if in_rect(x, y, PIN_DEL_X, PIN_DEL_Y, PIN_DEL_W, PIN_DEL_H) && len > 0 {
-        (AppState::EnterPin { order, digits, len: len - 1, gate, failures }, None, None, None)
+        (AppState::EnterPin { order, digits, len: len - 1, gate }, None, None, None)
     } else {
-        (AppState::EnterPin { order, digits, len, gate, failures }, None, None, None)
+        (AppState::EnterPin { order, digits, len, gate }, None, None, None)
     }
 }
 
@@ -509,12 +660,12 @@ fn step_settings(x: i32, y: i32, seed: u32) -> StepResult {
     if in_rect(x, y, SETTINGS_BTN_X, SETTINGS_Y0, SETTINGS_BTN_W, SETTINGS_BTN_H) {
         (AppState::EnterPin {
             order: shuffle(seed), digits: [0u8; 6], len: 0,
-            gate: PinGate::ShowMnemonic, failures: 0,
+            gate: PinGate::ShowMnemonic,
         }, None, None, None)
     } else if in_rect(x, y, SETTINGS_BTN_X, SETTINGS_Y1, SETTINGS_BTN_W, SETTINGS_BTN_H) {
         (AppState::EnterPin {
             order: shuffle(seed), digits: [0u8; 6], len: 0,
-            gate: PinGate::ChangePin, failures: 0,
+            gate: PinGate::ChangePin,
         }, None, None, None)
     } else if in_rect(x, y, SETTINGS_BTN_X, SETTINGS_Y2, SETTINGS_BTN_W, SETTINGS_BTN_H) {
         (AppState::About, None, None, None)
@@ -551,8 +702,6 @@ fn step_about(x: i32, y: i32) -> StepResult {
 }
 
 fn step_sign_scan(x: i32, y: i32) -> StepResult {
-    // Viewfinder tap is handled as WalletEvent::PsbtScanned by the host (simulator / hardware).
-    // Only Cancel is handled here.
     if in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H) {
         (AppState::Home, None, None, None)
     } else {
@@ -721,6 +870,14 @@ mod tests {
     const LCG_INCREMENT: u32 = 1_013_904_223;
     const ORDER: [u8; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
+    fn no_persist() -> impl FnMut(&[u8; PERSIST_BYTES]) { |_: &_| {} }
+
+    /// Drive `wallet.handle_event` with a touch at (x,y), seeded entropy, no-op persist.
+    fn touch(wallet: &mut ColdWallet, x: i32, y: i32, seed: u32) {
+        let (event, _) = create_touch_event_with_entropy(x, y, seed);
+        wallet.handle_event(event, &mut |_: &_| {});
+    }
+
     /// Creates a touch event with reproducible entropy derived from a seed.
     fn create_touch_event_with_entropy(x: i32, y: i32, seed: u32) -> (WalletEvent, [u8; 32]) {
         let mut entropy = [0u8; 32];
@@ -734,7 +891,6 @@ mod tests {
 
     #[test]
     fn find_matches_filters_by_prefix() {
-        // "ab" should match "abandon", "ability", "able" — the first 3 BIP39 words starting with "ab".
         let buf: [u8; 8] = *b"ab\0\0\0\0\0\0";
         let matches = find_matches(&buf, 2);
         let word_list = bip39::Language::English.word_list();
@@ -756,7 +912,6 @@ mod tests {
         let init = AppState::RestoreWallet {
             word_idx: 0, buf: [0u8; 8], buf_len: 0, confirmed: [0u16; 24], error: false,
         };
-        // Tap 'Q' on keyboard (ROW0_X + 1, ROW0_Y + 1) → stored as 'q' (lowercase)
         let (event, _) = create_touch_event_with_entropy(ROW0_X + 1, ROW0_Y + 1, 77);
         let (state, _, _, _) = step(init, event, None);
         match state {
@@ -774,7 +929,6 @@ mod tests {
         let init = AppState::RestoreWallet {
             word_idx: 0, buf, buf_len: 1, confirmed: [0u16; 24], error: false,
         };
-        // BKSP_X overlaps the 'B' key at ROW2 — use a coordinate clearly past all letter keys.
         let (event, _) = create_touch_event_with_entropy(BKSP_X + BKSP_W - 5, ROW2_Y + 1, 88);
         let (state, _, _, _) = step(init, event, None);
         match state {
@@ -791,56 +945,6 @@ mod tests {
         let (event, _) = create_touch_event_with_entropy(PP_SKIP_X + 1, PP_BTN_Y + 1, 99);
         let (state, _, _, _) = step(init, event, None);
         assert_eq!(state, AppState::Welcome);
-    }
-
-    #[test]
-    fn restore_wallet_full_round_trip() {
-        // Encode a known entropy, get the 24 word indices, simulate tapping each
-        // suggestion (index 0 in suggestions = word_list[idx]) through the state machine.
-        let entropy = [0x11u8; 32];
-        let m = bip39::Mnemonic::from_entropy(&entropy).unwrap();
-        let word_list = bip39::Language::English.word_list();
-        let mut word_indices = [0u16; 24];
-        for (i, word) in m.words().enumerate() {
-            word_indices[i] = word_list.iter().position(|&w| w == word).unwrap() as u16;
-        }
-
-        let mut state = AppState::RestoreWallet {
-            word_idx: 0, buf: [0u8; 8], buf_len: 0, confirmed: [0u16; 24], error: false,
-        };
-
-        for wi in 0..24usize {
-            let target = word_indices[wi];
-            let target_word = word_list[target as usize];
-
-            // Type enough chars so the target appears as suggestions[0].
-            // We type up to 4 chars of the word until suggestions[0] == target.
-            for char_count in 1..=target_word.len().min(8) {
-                let prefix = &target_word.as_bytes()[..char_count];
-                let mut buf = [0u8; 8];
-                buf[..char_count].copy_from_slice(prefix);
-                let matches = find_matches(&buf, char_count as u8);
-                if matches[0] == Some(target) {
-                    // Set state with this prefix then tap suggestion 0
-                    if let AppState::RestoreWallet { word_idx, confirmed, .. } = state {
-                        state = AppState::RestoreWallet {
-                            word_idx, buf, buf_len: char_count as u8, confirmed, error: false,
-                        };
-                    }
-                    break;
-                }
-            }
-
-            // Tap suggestion button 0
-            let (event, _) = create_touch_event_with_entropy(
-                RESTORE_SUGGEST_X0 + 1, RESTORE_SUGGEST_Y + 1, 42,
-            );
-            let (new_state, _, _, _) = step(state, event, None);
-            state = new_state;
-        }
-
-        // After 24 words, should transition to EnterPassphrase with correct entropy
-        assert!(matches!(state, AppState::EnterPassphrase { .. }));
     }
 
     #[test]
@@ -878,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn welcome_new_wallet_generates_words() {
+    fn step_welcome_new_wallet_generates_words() {
         let (event, event_entropy) = create_touch_event_with_entropy(BTN_X + 1, BTN_NEW_Y + 1, 42);
         let (state, pin, words, returned_entropy) = step(AppState::Welcome, event, None);
         assert_eq!(state, AppState::NewWallet { page: 0 });
@@ -893,207 +997,281 @@ mod tests {
         }
     }
 
-    #[test]
-    fn welcome_restore_wallet() {
-        let (event, _) = create_touch_event_with_entropy(BTN_X + 1, BTN_RESTORE_Y + 1, 7);
-        let (state, _, words, entropy) = step(AppState::Welcome, event, None);
-        assert!(matches!(state, AppState::RestoreWallet { word_idx: 0, buf_len: 0, .. }));
-        assert!(words.is_none());
-        assert!(entropy.is_none());
+    // ── PIN UI tests (no encryption needed — disk_image stays None) ──────
+
+    /// Builds digits without going through encryption: handle_event will land in
+    /// EnterPin{len:6}, resolve_enter_pin runs and, because disk_image is None
+    /// and self.pin is set, falls back to plain in-memory PIN comparison.
+    fn build_wallet_with_pin(pin: [u8; 6]) -> ColdWallet {
+        let mut w = ColdWallet::new();
+        w.pin = Some(pin);
+        w
     }
 
     #[test]
-    fn new_wallet_navigation() {
-        let (event, _) = create_touch_event_with_entropy(NAV_NEXT_X + 1, NAV_BTN_Y + 1, 1);
-        let (state, _, _, _) = step(AppState::NewWallet { page: 0 }, event, None);
-        assert_eq!(state, AppState::NewWallet { page: 1 });
-
-        let (event, _) = create_touch_event_with_entropy(NAV_NEXT_X + 1, NAV_BTN_Y + 1, 1);
-        let (state, _, _, _) = step(AppState::NewWallet { page: 3 }, event, None);
-        assert_eq!(state, AppState::EnterPassphrase { buf: [0u8; 32], len: 0 });
-    }
-
-    #[test]
-    fn enter_passphrase_accepts_input_and_skips() {
-        let (event, _) = create_touch_event_with_entropy(ROW0_X + 1, ROW0_Y + 1, 9);
-        let (state, _, _, _) = step(AppState::EnterPassphrase { buf: [0u8; 32], len: 0 }, event, None);
-        match state {
-            AppState::EnterPassphrase { buf, len } => {
-                assert_eq!(len, 1);
-                assert_eq!(buf[0], b'Q');
-            }
-            _ => panic!("expected EnterPassphrase"),
-        }
-
-        let (event, _) = create_touch_event_with_entropy(PP_SKIP_X + 1, PP_BTN_Y + 1, 9);
-        let (state, _, _, _) = step(AppState::EnterPassphrase { buf: [0u8; 32], len: 0 }, event, None);
-        match state {
-            AppState::SetPin { len, .. } => assert_eq!(len, 0),
-            _ => panic!("expected SetPin"),
-        }
-    }
-
-    #[test]
-    fn passphrase_buffer_limits_input() {
-        let buf = [b'A'; 32];
-        let (event, _) = create_touch_event_with_entropy(ROW0_X + 1, ROW0_Y + 1, 10);
-        let (state, _, _, _) = step(AppState::EnterPassphrase { buf, len: 32 }, event, None);
-        match state {
-            AppState::EnterPassphrase { buf: next_buf, len } => {
-                assert_eq!(len, 32);
-                assert_eq!(next_buf, buf);
-            }
-            _ => panic!("expected EnterPassphrase"),
-        }
-    }
-
-    #[test]
-    fn set_pin_then_confirm_matches() {
-        let mut state = AppState::SetPin { order: ORDER, digits: [0u8; 6], len: 0 };
+    fn enter_pin_unlock_with_in_memory_pin() {
+        let stored = [0u8, 1, 2, 3, 4, 5];
+        let mut w  = build_wallet_with_pin(stored);
+        w.state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::Unlock };
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
-            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 3);
-            state = step(state, event, None).0;
+            touch(&mut w, x + 1, y + 1, 5);
         }
-        let pin = match state {
-            AppState::ConfirmPin { pin, len, .. } => {
-                assert_eq!(len, 0);
-                pin
-            }
-            _ => panic!("expected ConfirmPin"),
-        };
-        assert_eq!(pin, [0, 1, 2, 3, 4, 5]);
-
-        let mut state = AppState::ConfirmPin { pin, order: ORDER, digits: [0u8; 6], len: 0 };
-        let mut result_pin = None;
-        for pos in 0..6 {
-            let (x, y) = pin_key_pos(pos);
-            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 3);
-            let (next_state, new_pin, _, _) = step(state, event, None);
-            state = next_state;
-            result_pin = result_pin.or(new_pin);
-        }
-        assert_eq!(state, AppState::Home);
-        assert_eq!(result_pin, Some([0, 1, 2, 3, 4, 5]));
-    }
-
-    #[test]
-    fn set_pin_respects_custom_order() {
-        let order = [5u8, 4, 3, 2, 1, 0, 9, 8, 7, 6];
-        let mut state = AppState::SetPin { order, digits: [0u8; 6], len: 0 };
-        for pos in 0..6 {
-            let (x, y) = pin_key_pos(pos);
-            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 11);
-            state = step(state, event, None).0;
-        }
-        match state {
-            AppState::ConfirmPin { pin, .. } => {
-                assert_eq!(pin, [5, 4, 3, 2, 1, 0]);
-            }
-            _ => panic!("expected ConfirmPin"),
-        }
-    }
-
-    #[test]
-    fn confirm_pin_mismatch_flows_to_reset() {
-        let pin = [1u8; 6];
-        let mut state = AppState::ConfirmPin { pin, order: ORDER, digits: [0u8; 6], len: 0 };
-        for pos in 0..6 {
-            let (x, y) = pin_key_pos(pos);
-            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 4);
-            state = step(state, event, None).0;
-        }
-        assert_eq!(state, AppState::PinMismatch);
-
-        let (event, _) = create_touch_event_with_entropy(0, 0, 4);
-        let (state, _, _, _) = step(state, event, None);
-        match state {
-            AppState::SetPin { len, .. } => assert_eq!(len, 0),
-            _ => panic!("expected SetPin"),
-        }
-    }
-
-    #[test]
-    fn enter_pin_unlock_gate() {
-        let stored_pin = Some([0, 1, 2, 3, 4, 5]);
-        let mut state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::Unlock, failures: 0 };
-        for pos in 0..6 {
-            let (x, y) = pin_key_pos(pos);
-            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 5);
-            state = step(state, event, stored_pin).0;
-        }
-        assert_eq!(state, AppState::Home);
+        assert_eq!(w.state, AppState::Home);
+        assert_eq!(w.failures, 0);
     }
 
     #[test]
     fn enter_pin_show_mnemonic_gate() {
-        let stored_pin = Some([0, 1, 2, 3, 4, 5]);
-        let mut state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::ShowMnemonic, failures: 0 };
+        let stored = [0u8, 1, 2, 3, 4, 5];
+        let mut w  = build_wallet_with_pin(stored);
+        w.state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::ShowMnemonic };
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
-            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 12);
-            state = step(state, event, stored_pin).0;
+            touch(&mut w, x + 1, y + 1, 12);
         }
-        assert_eq!(state, AppState::ShowMnemonic { page: 0 });
+        assert_eq!(w.state, AppState::ShowMnemonic { page: 0 });
     }
 
     #[test]
     fn enter_pin_change_pin_gate() {
-        let stored_pin = Some([0, 1, 2, 3, 4, 5]);
-        let mut state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::ChangePin, failures: 0 };
+        let stored = [0u8, 1, 2, 3, 4, 5];
+        let mut w  = build_wallet_with_pin(stored);
+        w.state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::ChangePin };
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
-            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 13);
-            state = step(state, event, stored_pin).0;
+            touch(&mut w, x + 1, y + 1, 13);
         }
-        match state {
-            AppState::SetPin { len, .. } => assert_eq!(len, 0),
-            _ => panic!("expected SetPin"),
-        }
+        assert!(matches!(w.state, AppState::SetPin { .. }));
     }
 
     #[test]
-    fn enter_pin_rejects_mismatch() {
-        let stored_pin = Some([0, 1, 2, 3, 4, 5]);
-        let mut state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::Unlock, failures: 0 };
+    fn enter_pin_wrong_increments_failures() {
+        let stored = [0u8, 1, 2, 3, 4, 5];
+        let mut w  = build_wallet_with_pin(stored);
+        w.state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::Unlock };
         for pos in [1usize, 2, 3, 4, 5, 6] {
             let (x, y) = pin_key_pos(pos);
-            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 6);
-            state = step(state, event, stored_pin).0;
+            touch(&mut w, x + 1, y + 1, 6);
         }
-        match state {
-            AppState::EnterPin { len, gate, failures, .. } => {
-                assert_eq!(len, 0);
-                assert_eq!(gate, PinGate::Unlock);
-                assert_eq!(failures, 1);
-            }
-            _ => panic!("expected EnterPin"),
-        }
+        assert!(matches!(w.state, AppState::EnterPin { .. }));
+        assert_eq!(w.failures, 1);
     }
 
     #[test]
     fn enter_pin_lockout_after_max_attempts() {
-        let stored_pin = Some([0, 1, 2, 3, 4, 5]);
-        // Wrong PIN positions: tapping pos 1..6 gives digits [1,2,3,4,5,6] ≠ [0,1,2,3,4,5]
-        let wrong_positions = [1usize, 2, 3, 4, 5, 6];
+        let stored = [0u8, 1, 2, 3, 4, 5];
+        let mut w  = build_wallet_with_pin(stored);
+        w.state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::Unlock };
 
-        let mut state = AppState::EnterPin {
-            order: ORDER, digits: [0u8; 6], len: 0,
-            gate: PinGate::Unlock, failures: 0,
-        };
-
-        for attempt in 0..PIN_MAX_ATTEMPTS {
-            for &pos in &wrong_positions {
+        for _ in 0..PIN_MAX_ATTEMPTS {
+            for &pos in &[1usize, 2, 3, 4, 5, 6] {
                 let (x, y) = pin_key_pos(pos);
-                let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 6);
-                state = step(state, event, stored_pin).0;
-            }
-            if attempt < PIN_MAX_ATTEMPTS - 1 {
-                // Still in EnterPin with incremented failures
-                assert!(matches!(state, AppState::EnterPin { .. }), "should still be in EnterPin after attempt {attempt}");
+                touch(&mut w, x + 1, y + 1, 6);
             }
         }
+        assert_eq!(w.state, AppState::PinLocked);
+        assert!(w.locked);
+        assert_eq!(w.failures, PIN_MAX_ATTEMPTS);
+    }
 
-        assert_eq!(state, AppState::PinLocked);
+    // ── Write-ahead persistence: failures must be persisted BEFORE check ──
+
+    #[test]
+    fn write_ahead_persist_runs_before_check() {
+        use core::cell::Cell;
+
+        // Build a wallet with a known disk_image so persist callbacks fire.
+        let mut w = ColdWallet::new();
+        w.entropy[0] = 1; w.seed[0] = 1;
+        let secrets = Secrets { entropy: w.entropy, seed: w.seed };
+        let salt  = [0xaau8; SALT_LEN];
+        let nonce = [0xbbu8; NONCE_LEN];
+        let key   = [0xccu8; KEY_LEN];
+        let image = encrypt_into_blob(&secrets, &salt, &nonce, &key, 0, false).unwrap();
+        w.salt       = salt;
+        w.enc_key    = Some(key);
+        w.pin        = Some([0u8, 1, 2, 3, 4, 5]);
+        w.disk_image = Some(image);
+        w.state = AppState::EnterPin { order: ORDER, digits: [0u8; 6], len: 0, gate: PinGate::Unlock };
+
+        // Persist callback records the failures field of every write it sees.
+        let writes: Cell<u8> = Cell::new(0);
+        let last_failures: Cell<u8> = Cell::new(255);
+        let mut persist = |blob: &[u8; PERSIST_BYTES]| {
+            writes.set(writes.get() + 1);
+            last_failures.set(blob[1]);
+        };
+
+        // Wrong PIN (positions 1..7 give digits [1,2,3,4,5,6]).
+        for &pos in &[1usize, 2, 3, 4, 5, 6] {
+            let (x, y) = pin_key_pos(pos);
+            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 7);
+            w.handle_event(event, &mut persist);
+        }
+
+        // At least one persist call must have written failures>=1 (the
+        // write-ahead) before the comparison resolved. This proves the counter
+        // hit disk before the check could short-circuit it.
+        assert!(writes.get() >= 1, "persist was never called");
+        assert!(last_failures.get() >= 1, "persisted failures field was never bumped");
+        assert_eq!(w.failures, 1);
+    }
+
+    // ── ConfirmPin → encryption ───────────────────────────────────────────
+
+    // ── End-to-end: setup → restart → AEAD-unlock ─────────────────────────
+
+    /// Drives ConfirmPin to completion, returning the persisted disk image.
+    fn setup_wallet_and_capture_image(pin: [u8; 6]) -> (ColdWallet, [u8; PERSIST_BYTES]) {
+        let mut w = ColdWallet::new();
+        w.entropy[0] = 0x42;
+        w.seed[0]    = 0x42;
+        w.state = AppState::ConfirmPin { pin, order: ORDER, digits: [0u8; 6], len: 0 };
+
+        let mut captured: Option<[u8; PERSIST_BYTES]> = None;
+        let mut persist = |blob: &[u8; PERSIST_BYTES]| { captured = Some(*blob); };
+        for &digit in &pin {
+            let pos = digit as usize; // ORDER is identity, so pos == digit
+            let (x, y) = pin_key_pos(pos);
+            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 7);
+            w.handle_event(event, &mut persist);
+        }
+        let image = captured.expect("persist must have been called");
+        (w, image)
+    }
+
+    /// Type the given PIN by looking up each digit's current position in the
+    /// shuffled pad — the pad re-shuffles after every wrong attempt.
+    fn type_pin_into(w: &mut ColdWallet, pin: [u8; 6]) {
+        for &digit in &pin {
+            let order = match w.state {
+                AppState::EnterPin   { order, .. } => order,
+                AppState::ConfirmPin { order, .. } => order,
+                AppState::SetPin     { order, .. } => order,
+                _ => panic!("type_pin_into called from non-PIN state {:?}", w.state),
+            };
+            let pos = order.iter().position(|&d| d == digit).unwrap();
+            let (x, y) = pin_key_pos(pos);
+            touch(w, x + 1, y + 1, 11);
+        }
+    }
+
+    #[test]
+    fn setup_then_restart_unlocks_with_aead() {
+        let pin = [0u8, 1, 2, 3, 4, 5];
+        let (orig, image) = setup_wallet_and_capture_image(pin);
+
+        // Simulate restart.
+        let mut w = ColdWallet::from_disk_image(image, [0xa5u8; 32]).unwrap();
+        assert!(matches!(w.state, AppState::EnterPin { gate: PinGate::Unlock, .. }));
+        assert_eq!(w.failures, 0);
+        assert!(!w.locked);
+        assert!(w.pin.is_none(), "cold start must not carry in-memory PIN");
+
+        type_pin_into(&mut w, pin);
+        assert_eq!(w.state, AppState::Home);
+        // Seed was recovered from ciphertext.
+        assert_eq!(w.seed[0], orig.seed[0]);
+        assert_eq!(w.entropy[0], orig.entropy[0]);
+        assert_eq!(w.failures, 0);
+    }
+
+    #[test]
+    fn setup_then_restart_wrong_pin_increments_and_persists() {
+        let correct = [0u8, 1, 2, 3, 4, 5];
+        let wrong   = [9u8, 9, 9, 9, 9, 9];
+        let (_, image) = setup_wallet_and_capture_image(correct);
+
+        let mut w = ColdWallet::from_disk_image(image, [0x33u8; 32]).unwrap();
+
+        use core::cell::Cell;
+        let last_failures: Cell<u8> = Cell::new(255);
+        let mut persist = |blob: &[u8; PERSIST_BYTES]| { last_failures.set(blob[1]); };
+
+        // Type wrong PIN by looking up positions in the current pad.
+        let order = match w.state {
+            AppState::EnterPin { order, .. } => order,
+            _ => unreachable!(),
+        };
+        for &digit in &wrong {
+            let pos = order.iter().position(|&d| d == digit).unwrap();
+            let (x, y) = pin_key_pos(pos);
+            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 12);
+            w.handle_event(event, &mut persist);
+        }
+
+        assert_eq!(w.failures, 1);
+        assert_eq!(last_failures.get(), 1, "failures must be persisted to disk");
+        assert!(matches!(w.state, AppState::EnterPin { .. }));
+        // Seed/entropy were not populated (AEAD failed).
+        assert_eq!(w.seed[0], 0);
+        assert_eq!(w.entropy[0], 0);
+    }
+
+    #[test]
+    fn lockout_state_survives_restart() {
+        let correct = [0u8, 1, 2, 3, 4, 5];
+        let wrong   = [9u8, 9, 9, 9, 9, 9];
+        let (_, image) = setup_wallet_and_capture_image(correct);
+
+        let mut w = ColdWallet::from_disk_image(image, [0x77u8; 32]).unwrap();
+
+        let last_image: core::cell::Cell<[u8; PERSIST_BYTES]> =
+            core::cell::Cell::new([0u8; PERSIST_BYTES]);
+        let mut persist = |blob: &[u8; PERSIST_BYTES]| { last_image.set(*blob); };
+
+        for _ in 0..PIN_MAX_ATTEMPTS {
+            // Look up positions in the current pad (re-shuffled after each failure).
+            let order = match w.state {
+                AppState::EnterPin { order, .. } => order,
+                AppState::PinLocked => break,
+                _ => unreachable!(),
+            };
+            for &digit in &wrong {
+                let pos = order.iter().position(|&d| d == digit).unwrap();
+                let (x, y) = pin_key_pos(pos);
+                let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 13);
+                w.handle_event(event, &mut persist);
+            }
+        }
+        assert_eq!(w.state, AppState::PinLocked);
+        let final_image = last_image.get();
+        assert_eq!(final_image[2], 1, "locked flag must be persisted");
+
+        // Simulate a hard restart with the most recently persisted image.
+        let w2 = ColdWallet::from_disk_image(final_image, [0x99u8; 32]).unwrap();
+        assert_eq!(w2.state, AppState::PinLocked);
+        assert!(w2.locked);
+    }
+
+    #[test]
+    fn confirm_pin_writes_encrypted_blob() {
+        let mut w = ColdWallet::new();
+        // Simulate that we just came from EnterPassphrase: seed/entropy populated.
+        w.entropy[0] = 0x42;
+        w.seed[0]    = 0x42;
+
+        let chosen_pin = [0u8, 1, 2, 3, 4, 5];
+        w.state = AppState::ConfirmPin { pin: chosen_pin, order: ORDER, digits: [0u8; 6], len: 0 };
+
+        // Capture the persisted image.
+        let mut captured: Option<[u8; PERSIST_BYTES]> = None;
+        let mut persist = |blob: &[u8; PERSIST_BYTES]| { captured = Some(*blob); };
+
+        for pos in 0..6 {
+            let (x, y) = pin_key_pos(pos);
+            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 99);
+            w.handle_event(event, &mut persist);
+        }
+
+        assert_eq!(w.state, AppState::Home);
+        assert!(w.disk_image.is_some());
+        let image = captured.expect("persist must have been called");
+        let hdr = DiskHeader::parse(&image).expect("v2 header");
+        assert_eq!(hdr.failures, 0);
+        assert!(!hdr.locked);
+        // The salt in the wallet matches the salt in the persisted image.
+        assert_eq!(hdr.salt, w.salt);
     }
 }

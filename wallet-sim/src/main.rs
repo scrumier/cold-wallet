@@ -6,7 +6,10 @@ use embedded_graphics_simulator::{
     OutputSettingsBuilder, SimulatorDisplay, SimulatorEvent, Window,
     sdl2::MouseButton,
 };
-use wallet_core::{draw_ui, AppState, ColdWallet, PersistedWallet, PERSIST_BYTES, WalletEvent};
+use wallet_core::{
+    draw_ui, AppState, ColdWallet, PERSIST_BYTES, Secrets, WalletEvent,
+    derive_key, encrypt_into_blob, NONCE_LEN, SALT_LEN,
+};
 
 // Viewfinder hit area — matches layout::SIGN_VF_* constants.
 const VF_X: i32 = 200; // (800 - 400) / 2
@@ -242,24 +245,74 @@ fn wallet_path() -> PathBuf {
     PathBuf::from(home).join(".config").join("cold-wallet").join("wallet.bin")
 }
 
-fn load_wallet() -> Option<PersistedWallet> {
-    let bytes: [u8; PERSIST_BYTES] = std::fs::read(wallet_path()).ok()?.try_into().ok()?;
-    PersistedWallet::from_bytes(&bytes)
-}
-
-fn save_wallet(p: &PersistedWallet) {
+/// Writes the v2 image atomically (write tmp, then rename).
+fn persist_blob(blob: &[u8; PERSIST_BYTES]) {
     let path = wallet_path();
     if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
-    let _ = std::fs::write(&path, p.to_bytes());
+    let tmp = path.with_extension("bin.tmp");
+    if std::fs::write(&tmp, blob).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
 }
+
+/// Loads the wallet from disk. Handles automatic migration from v1 (103 bytes,
+/// unencrypted) to v2 (143 bytes, ChaCha20-Poly1305 + PBKDF2 lockout header).
+///
+/// The migration is *transparent*: the user notices nothing other than a one-time
+/// extra delay at startup (≈500ms for PBKDF2 on the migrated PIN).
+fn load_wallet_image() -> Option<[u8; PERSIST_BYTES]> {
+    let bytes = std::fs::read(wallet_path()).ok()?;
+    match bytes.len() {
+        PERSIST_BYTES => bytes.try_into().ok(),
+        103 if bytes[102] == 1 => {
+            println!("[WALLET] Legacy v1 wallet detected — migrating to v2 (encrypted)…");
+            let v1: [u8; 103] = bytes.try_into().ok()?;
+            let v2 = migrate_v1_to_v2(&v1)?;
+            persist_blob(&v2);
+            println!("[WALLET] Migration complete.");
+            Some(v2)
+        }
+        n => {
+            eprintln!("[WALLET] Ignoring wallet.bin with unknown size {n}");
+            None
+        }
+    }
+}
+
+fn migrate_v1_to_v2(v1: &[u8; 103]) -> Option<[u8; PERSIST_BYTES]> {
+    let mut ent  = [0u8; 32]; ent.copy_from_slice(&v1[0..32]);
+    let mut seed = [0u8; 64]; seed.copy_from_slice(&v1[32..96]);
+    let mut pin  = [0u8; 6];  pin.copy_from_slice(&v1[96..102]);
+
+    let fresh = entropy();
+    let mut salt  = [0u8; SALT_LEN];
+    let mut nonce = [0u8; NONCE_LEN];
+    salt.copy_from_slice(&fresh[..SALT_LEN]);
+    nonce.copy_from_slice(&fresh[SALT_LEN..SALT_LEN + NONCE_LEN]);
+
+    let key = derive_key(&pin, &salt);
+    let secrets = Secrets { entropy: ent, seed };
+    let blob = encrypt_into_blob(&secrets, &salt, &nonce, &key, 0, false).ok()?;
+    // Zero locally-held PIN/key — secrets/seed/entropy are zeroed by Drop.
+    for b in pin.iter_mut() { unsafe { core::ptr::write_volatile(b, 0); } }
+    let mut k = key; for b in k.iter_mut() { unsafe { core::ptr::write_volatile(b, 0); } }
+    Some(blob)
+}
+
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut display = SimulatorDisplay::<Rgb565>::new(Size::new(SCREEN_WIDTH, SCREEN_HEIGHT));
-    let mut wallet = match load_wallet() {
-        Some(persisted) => {
-            println!("[WALLET] Persisted wallet found — resuming at PIN unlock");
-            ColdWallet::from_persisted(persisted, entropy())
-        }
+    let mut wallet = match load_wallet_image() {
+        Some(image) => match ColdWallet::from_disk_image(image, entropy()) {
+            Some(w) => {
+                println!("[WALLET] Persisted wallet found — resuming at PIN unlock");
+                w
+            }
+            None => {
+                eprintln!("[WALLET] Disk image rejected (bad header); starting fresh");
+                ColdWallet::new()
+            }
+        },
         None => ColdWallet::new(),
     };
 
@@ -277,6 +330,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 SimulatorEvent::MouseButtonUp { mouse_btn: MouseButton::Left, point } => {
                     let before = wallet.get_state();
 
+                    // Persist closure: receives the wallet's current on-disk image
+                    // every time the wallet needs to be written (write-ahead before
+                    // a PIN check, after successful unlock, after PIN setup / change).
+                    let mut persist = |blob: &[u8; PERSIST_BYTES]| {
+                        persist_blob(blob);
+                    };
+
                     // In SignScan, a tap in the viewfinder simulates a QR scan.
                     if matches!(before, AppState::SignScan)
                         && in_rect(point.x, point.y, VF_X, VF_Y, VF_W, VF_H)
@@ -284,27 +344,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(ik) = wallet.tap_internal_key() {
                             println!("[WALLET] SignScan: injecting test PSBT…");
                             let (data, len) = make_test_psbt_b64(ik);
-                            wallet.handle_event(WalletEvent::PsbtScanned { data, len });
+                            wallet.handle_event(WalletEvent::PsbtScanned { data, len }, &mut persist);
                         } else {
                             println!("[WALLET] SignScan: no key derived yet — complete wallet setup first");
                         }
                     } else {
-                        wallet.handle_event(WalletEvent::Touch {
-                            x: point.x, y: point.y, entropy: entropy(),
-                        });
+                        wallet.handle_event(
+                            WalletEvent::Touch { x: point.x, y: point.y, entropy: entropy() },
+                            &mut persist,
+                        );
                     }
 
                     let after = wallet.get_state();
                     if before != after {
                         log_transition(before, after);
-                        // Persist after PIN is confirmed — wallet is fully set up.
                         if matches!(before, AppState::ConfirmPin { .. })
                             && matches!(after, AppState::Home)
                         {
-                            if let Some(ref p) = wallet.to_persisted() {
-                                save_wallet(p);
-                                println!("[WALLET] Wallet saved to {}", wallet_path().display());
-                            }
+                            println!("[WALLET] Wallet saved (encrypted) to {}", wallet_path().display());
                         }
                         draw_ui(&mut display, &wallet)?;
                     }
