@@ -131,6 +131,7 @@ mod tests {
             amount_sats: 99_000,
             script_pubkey: spk,
             script_len: 34,
+            tap_internal_key: None,
         };
         psbt
     }

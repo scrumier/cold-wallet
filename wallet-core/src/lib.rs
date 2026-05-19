@@ -31,5 +31,6 @@ where
         wallet.receive_address(),
         wallet.current_psbt(),
         wallet.signed_psbt_b64(),
+        wallet.tap_output_key(),
     )
 }

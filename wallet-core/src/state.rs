@@ -135,6 +135,15 @@ impl ColdWallet {
         crate::derive::tap_keypair(&self.seed).map(|(ik, _)| ik)
     }
 
+    /// Returns the x-only *tweaked* output key — i.e. the 32-byte witness
+    /// program that appears in our own P2TR scriptPubKeys. Used by the sign-
+    /// review screen to identify change outputs without trusting PSBT
+    /// metadata.
+    pub fn tap_output_key(&self) -> Option<[u8; 32]> {
+        let ik = self.tap_internal_key()?;
+        crate::derive::taproot_tweak_pub(&ik)
+    }
+
     /// Returns the currently loaded PSBT, if any.
     pub fn current_psbt(&self) -> Option<&ParsedPsbt> { self.psbt.as_ref() }
 
@@ -869,8 +878,6 @@ mod tests {
     const LCG_MULTIPLIER: u32 = 1_664_525;
     const LCG_INCREMENT: u32 = 1_013_904_223;
     const ORDER: [u8; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-
-    fn no_persist() -> impl FnMut(&[u8; PERSIST_BYTES]) { |_: &_| {} }
 
     /// Drive `wallet.handle_event` with a touch at (x,y), seeded entropy, no-op persist.
     fn touch(wallet: &mut ColdWallet, x: i32, y: i32, seed: u32) {

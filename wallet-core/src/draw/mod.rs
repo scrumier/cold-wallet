@@ -29,6 +29,7 @@ pub fn draw_ui<D>(
     address: Option<&str>,
     psbt: Option<&ParsedPsbt>,
     signed_b64: Option<&str>,
+    our_output_key: Option<[u8; 32]>,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
@@ -53,7 +54,7 @@ where
         AppState::ShowMnemonic { page }            => mnemonic::draw(display, page, words)?,
         AppState::About                            => about::draw(display)?,
         AppState::SignScan                         => sign_scan::draw(display)?,
-        AppState::SignReview                       => sign_review::draw(display, psbt)?,
+        AppState::SignReview                       => sign_review::draw(display, psbt, our_output_key)?,
         AppState::SignResult                       => sign_result::draw(display, signed_b64)?,
         _                                          => draw_placeholder(display, state)?,
     }

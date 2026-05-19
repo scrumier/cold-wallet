@@ -54,11 +54,21 @@ pub struct TxOutput {
     pub amount_sats:   u64,
     pub script_pubkey: [u8; MAX_SPK_LEN],
     pub script_len:    usize,
+    /// x-only internal key from PSBT_OUT_TAP_INTERNAL_KEY (0x05). When this
+    /// matches the wallet's own internal key, the output is the wallet's own
+    /// change. Note: we do NOT rely on this alone — sign_review additionally
+    /// verifies by re-deriving the output key from the wallet's seed and
+    /// comparing to the scriptPubKey witness program, so a malicious host
+    /// cannot disguise change as a send by simply omitting this field.
+    pub tap_internal_key: Option<[u8; 32]>,
 }
 
 impl TxOutput {
     const fn zero() -> Self {
-        Self { amount_sats: 0, script_pubkey: [0u8; MAX_SPK_LEN], script_len: 0 }
+        Self {
+            amount_sats: 0, script_pubkey: [0u8; MAX_SPK_LEN], script_len: 0,
+            tap_internal_key: None,
+        }
     }
 }
 
@@ -161,16 +171,6 @@ impl<'a> Reader<'a> {
         Ok(Some((key, value)))
     }
 
-    /// Skips all remaining key-value pairs in a map (reads until terminator).
-    fn skip_map(&mut self) -> Result<(), PsbtError> {
-        loop {
-            let klen = self.read_varint().ok_or(PsbtError::Truncated)? as usize;
-            if klen == 0 { return Ok(()); }
-            self.read_bytes(klen).ok_or(PsbtError::Truncated)?;
-            let vlen = self.read_varint().ok_or(PsbtError::Truncated)? as usize;
-            self.read_bytes(vlen).ok_or(PsbtError::Truncated)?;
-        }
-    }
 }
 
 impl ParsedPsbt {
@@ -241,9 +241,24 @@ impl ParsedPsbt {
             }
         }
 
-        // ── Per-output maps (skip — unsigned outputs carry no PSBT data) ───
-        for _ in 0..psbt.output_count {
-            r.skip_map()?;
+        // ── Per-output maps ─────────────────────────────────────────────────
+        // We only care about PSBT_OUT_TAP_INTERNAL_KEY (0x05) for change
+        // detection. Every other key is ignored.
+        for i in 0..psbt.output_count {
+            loop {
+                match r.read_kv()? {
+                    None => break,
+                    Some((key, value)) => match key.first() {
+                        // PSBT_OUT_TAP_INTERNAL_KEY = 0x05
+                        Some(&0x05) if key.len() == 1 && value.len() == 32 => {
+                            let mut k = [0u8; 32];
+                            k.copy_from_slice(value);
+                            psbt.outputs[i].tap_internal_key = Some(k);
+                        }
+                        _ => {} // ignore
+                    },
+                }
+            }
         }
 
         Ok(psbt)
@@ -334,9 +349,13 @@ pub fn encode_signed(psbt: &ParsedPsbt, tx_raw: &[u8], out: &mut [u8]) -> Result
         w.byte(0x00).ok_or(PsbtError::OutputBufTooSmall)?; // terminator
     }
 
-    // Per-output maps (all empty for key-path spends)
-    for _ in 0..psbt.output_count {
-        w.byte(0x00).ok_or(PsbtError::OutputBufTooSmall)?;
+    // Per-output maps. Preserve PSBT_OUT_TAP_INTERNAL_KEY so downstream
+    // wallets/coordinators retain change-output annotations.
+    for i in 0..psbt.output_count {
+        if let Some(ref ik) = psbt.outputs[i].tap_internal_key {
+            w.psbt_kv(&[0x05], ik.as_ref()).ok_or(PsbtError::OutputBufTooSmall)?;
+        }
+        w.byte(0x00).ok_or(PsbtError::OutputBufTooSmall)?; // terminator
     }
 
     Ok(w.pos)

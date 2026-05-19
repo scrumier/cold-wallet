@@ -78,6 +78,12 @@ pub fn taproot_tweak_pub(internal_key: &[u8; 32]) -> Option<[u8; 32]> {
     taproot_tweak(internal_key)
 }
 
+/// Encodes a 32-byte P2TR witness program as a mainnet `bc1p…` address.
+/// Used by the sign-review screen to display destination addresses in full.
+pub fn address_from_witness_program(witness_program: &[u8; 32]) -> [u8; 62] {
+    p2tr_mainnet(witness_program)
+}
+
 // Q = P + H_TapTweak(P)·G
 // where H_tag(m) = SHA256(SHA256(tag) ‖ SHA256(tag) ‖ m)
 fn taproot_tweak(internal_key: &[u8; 32]) -> Option<[u8; 32]> {
