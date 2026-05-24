@@ -37,6 +37,14 @@ pub enum AppState {
     ConfirmPin       { pin: [u8; 6], order: [u8; 10], digits: [u8; 6], len: u8 },
     PinMismatch,
     EnterPin         { order: [u8; 10], digits: [u8; 6], len: u8, gate: PinGate },
+    /// Intermediate state: 6th PIN digit just entered, write-ahead persist
+    /// already done, but the slow PBKDF2 + AEAD decryption hasn't run yet.
+    /// Drawn as "Verifying PIN…" so the user has feedback during the ~500ms
+    /// (release) / ~2-3s (debug) KDF. Resolved by `process_pending`.
+    PinVerifying     { digits: [u8; 6], gate: PinGate },
+    /// Intermediate state: ConfirmPin matched, but the slow PBKDF2 +
+    /// encryption pass hasn't run yet. Drawn as "Saving wallet…".
+    PinConfirming    { new_pin: [u8; 6] },
     /// Permanent lockout after PIN_MAX_ATTEMPTS wrong attempts.
     PinLocked,
     Home,
@@ -223,14 +231,17 @@ impl ColdWallet {
             self.derive_address(pp);
         }
 
-        // ── PIN verification (write-ahead → check → resolve) ──────────────
+        // ── PIN verification: cheap phase (write-ahead + in-memory check) ─
+        // Slow KDF + AEAD decryption is deferred to `process_pending` so the
+        // UI can render a "Verifying PIN…" indicator first.
         if let AppState::EnterPin { digits, len: 6, gate, .. } = self.state {
-            self.resolve_enter_pin(digits, gate, &touch_entropy, persist);
+            self.begin_enter_pin(digits, gate, &touch_entropy, persist);
         }
 
-        // ── PIN confirmation (initial setup OR change PIN) ────────────────
+        // ── PIN confirmation: cheap phase (digit comparison) ──────────────
+        // Slow KDF + AEAD encryption is deferred to `process_pending`.
         if let AppState::ConfirmPin { pin, digits, len: 6, .. } = self.state {
-            self.resolve_confirm_pin(pin, digits, &touch_entropy, persist);
+            self.begin_confirm_pin(pin, digits);
         }
 
         // Sign the PSBT when user confirms on the review screen.
@@ -248,58 +259,53 @@ impl ColdWallet {
         }
     }
 
-    // ── PIN orchestration ─────────────────────────────────────────────────
+    // ── PIN orchestration: cheap (in handle_event) + slow (process_pending) ─
 
-    /// 6th digit of `EnterPin` just entered. Write-ahead the bumped failure
-    /// counter, then verify the PIN (in-memory if already known, else by AEAD
-    /// decryption of the disk image), then transition.
-    fn resolve_enter_pin<F: FnMut(&[u8; PERSIST_BYTES])>(
+    /// Cheap phase of EnterPin resolution. Runs synchronously when the 6th
+    /// digit is entered. Side-effects:
+    ///   - Write-ahead increment of `failures` on disk (before any check).
+    ///   - If the PIN is already known in-memory (in-session prompt), does the
+    ///     plain comparison inline and transitions straight to the gate target
+    ///     / EnterPin retry / PinLocked.
+    ///   - Otherwise (cold-start: PIN must be verified via AEAD decryption),
+    ///     parks the state machine in `PinVerifying` and returns. The actual
+    ///     KDF + AEAD will run in `process_pending`.
+    fn begin_enter_pin<F: FnMut(&[u8; PERSIST_BYTES])>(
         &mut self,
         digits:        [u8; 6],
         gate:          PinGate,
         touch_entropy: &[u8; 32],
         persist:       &mut F,
     ) {
-        // 1) Write-ahead: bump failures on disk *before* checking. If we crash
-        //    between this write and the check, the counter is already incremented,
-        //    so a restart cannot rewind the lockout.
+        // Write-ahead: bump failures on disk *before* checking. A crash here
+        // leaves the counter incremented, so restart cannot rewind the lockout.
         self.failures = self.failures.saturating_add(1);
         if let Some(ref mut img) = self.disk_image {
             update_lockout(img, self.failures, false);
             persist(img);
         }
 
-        // 2) Verify. Two paths:
-        //    a) In-memory PIN known (set during the same session): plain compare.
-        //    b) Cold boot from disk: derive key from typed digits + salt, attempt
-        //       AEAD decryption. Successful decrypt ⇔ correct PIN.
-        let correct = if let Some(ref stored) = self.pin {
-            stored == &digits
-        } else if let Some(ref img) = self.disk_image {
-            let key = crypto::derive_key(&digits, &self.salt);
-            match try_decrypt(img, &key) {
-                Ok(secrets) => {
-                    self.entropy = secrets.entropy;
-                    self.seed    = secrets.seed;
-                    self.address = taproot_address(&self.seed).unwrap_or([0u8; 62]);
-                    self.words   = generate_words(&self.entropy);
-                    self.pin     = Some(digits);
-                    self.enc_key = Some(key);
-                    true
-                }
-                Err(_) => false,
-            }
+        if let Some(stored) = self.pin {
+            // In-session fast path: plain comparison, resolve immediately.
+            let correct = stored == digits;
+            self.finalize_enter_pin(correct, gate, touch_entropy, persist);
         } else {
-            // No persisted wallet and no in-memory PIN — can't verify. Treat as wrong.
-            false
-        };
+            // Cold-start path: AEAD verification is slow — park in PinVerifying
+            // and let `process_pending` run the KDF after the UI redraws.
+            self.state = AppState::PinVerifying { digits, gate };
+        }
+    }
 
-        // Zero typed digits before re-using them.
-        let mut scratch = digits;
-        zero_sensitive(&mut scratch);
-
+    /// Resolves a PIN attempt outcome. Shared by the in-session fast path and
+    /// the cold-start KDF path.
+    fn finalize_enter_pin<F: FnMut(&[u8; PERSIST_BYTES])>(
+        &mut self,
+        correct:       bool,
+        gate:          PinGate,
+        touch_entropy: &[u8; 32],
+        persist:       &mut F,
+    ) {
         if correct {
-            // 3a) Success → reset counter, persist, transition based on gate.
             self.failures = 0;
             if let Some(ref mut img) = self.disk_image {
                 update_lockout(img, 0, false);
@@ -315,7 +321,6 @@ impl ColdWallet {
                 },
             };
         } else if self.failures >= PIN_MAX_ATTEMPTS {
-            // 3b) Too many failures → permanent lockout.
             self.locked = true;
             if let Some(ref mut img) = self.disk_image {
                 update_lockout(img, self.failures, true);
@@ -323,7 +328,6 @@ impl ColdWallet {
             }
             self.state = AppState::PinLocked;
         } else {
-            // 3c) Wrong PIN, attempts remaining → re-shuffle pad, clear digits.
             let seed_u32 = u32::from_le_bytes(touch_entropy[..4].try_into().unwrap());
             self.state = AppState::EnterPin {
                 order:  shuffle(seed_u32),
@@ -333,43 +337,97 @@ impl ColdWallet {
         }
     }
 
-    /// 6th digit of `ConfirmPin` just entered. If it matches, this is either
-    /// initial wallet setup or a PIN change — in both cases we (re-)derive the
-    /// encryption key, encrypt entropy+seed under it, and persist.
-    fn resolve_confirm_pin<F: FnMut(&[u8; PERSIST_BYTES])>(
-        &mut self,
-        pin:           [u8; 6],
-        digits:        [u8; 6],
-        touch_entropy: &[u8; 32],
-        persist:       &mut F,
-    ) {
+    /// Cheap phase of ConfirmPin resolution. Compares the entered digits to
+    /// the originally chosen PIN. On mismatch → PinMismatch. On match → parks
+    /// in `PinConfirming` for the slow encryption pass.
+    fn begin_confirm_pin(&mut self, pin: [u8; 6], digits: [u8; 6]) {
         if digits != pin {
-            // Don't leak via comparison ordering — we already did the compare above,
-            // but the failure path just resets to SetPin.
             self.state = AppState::PinMismatch;
-            // Zero local copies.
             let mut a = digits; zero_sensitive(&mut a);
             let mut b = pin;    zero_sensitive(&mut b);
             return;
         }
+        self.state = AppState::PinConfirming { new_pin: digits };
+        let mut a = digits; zero_sensitive(&mut a);
+        let mut b = pin;    zero_sensitive(&mut b);
+    }
 
-        // PIN matches → encrypt. We always regenerate salt + nonce so a PIN
-        // change yields a completely fresh ciphertext (no cross-correlation
-        // with the previous encryption).
+    /// Runs the deferred slow work when the state machine is parked in
+    /// `PinVerifying` or `PinConfirming`. The host (sim / firmware) calls this
+    /// AFTER drawing the intermediate spinner screen, so the user sees
+    /// "Verifying PIN…" / "Saving wallet…" during the PBKDF2 pass.
+    ///
+    /// `fresh_entropy` is consumed for shuffling the next PIN pad (verify path)
+    /// and for generating fresh salt + nonce (confirm path).
+    ///
+    /// Returns `true` iff there was pending work to do.
+    pub fn process_pending<F>(&mut self, fresh_entropy: [u8; 32], persist: &mut F) -> bool
+    where
+        F: FnMut(&[u8; PERSIST_BYTES]),
+    {
+        match self.state {
+            AppState::PinVerifying { digits, gate } => {
+                self.process_pin_verifying(digits, gate, &fresh_entropy, persist);
+                true
+            }
+            AppState::PinConfirming { new_pin } => {
+                self.process_pin_confirming(new_pin, &fresh_entropy, persist);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn process_pin_verifying<F: FnMut(&[u8; PERSIST_BYTES])>(
+        &mut self,
+        digits:        [u8; 6],
+        gate:          PinGate,
+        fresh_entropy: &[u8; 32],
+        persist:       &mut F,
+    ) {
+        // Cold-start: try to decrypt the disk image with the typed PIN.
+        let correct = if let Some(ref img) = self.disk_image {
+            let key = crypto::derive_key(&digits, &self.salt);
+            match try_decrypt(img, &key) {
+                Ok(secrets) => {
+                    self.entropy = secrets.entropy;
+                    self.seed    = secrets.seed;
+                    self.address = taproot_address(&self.seed).unwrap_or([0u8; 62]);
+                    self.words   = generate_words(&self.entropy);
+                    self.pin     = Some(digits);
+                    self.enc_key = Some(key);
+                    true
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+
+        let mut scratch = digits;
+        zero_sensitive(&mut scratch);
+
+        self.finalize_enter_pin(correct, gate, fresh_entropy, persist);
+    }
+
+    fn process_pin_confirming<F: FnMut(&[u8; PERSIST_BYTES])>(
+        &mut self,
+        new_pin:       [u8; 6],
+        fresh_entropy: &[u8; 32],
+        persist:       &mut F,
+    ) {
         let mut salt  = [0u8; SALT_LEN];
         let mut nonce = [0u8; NONCE_LEN];
-        salt.copy_from_slice(&touch_entropy[..SALT_LEN]);
-        nonce.copy_from_slice(&touch_entropy[SALT_LEN..SALT_LEN + NONCE_LEN]);
+        salt.copy_from_slice(&fresh_entropy[..SALT_LEN]);
+        nonce.copy_from_slice(&fresh_entropy[SALT_LEN..SALT_LEN + NONCE_LEN]);
 
-        // Slow PBKDF2 (≈500ms). Acceptable for PIN-set events; user expects a beat.
-        let key = crypto::derive_key(&digits, &salt);
-
+        let key = crypto::derive_key(&new_pin, &salt);
         let secrets = Secrets { entropy: self.entropy, seed: self.seed };
         match encrypt_into_blob(&secrets, &salt, &nonce, &key, 0, false) {
             Ok(image) => {
                 self.salt       = salt;
                 self.enc_key    = Some(key);
-                self.pin        = Some(digits);
+                self.pin        = Some(new_pin);
                 self.failures   = 0;
                 self.locked     = false;
                 self.disk_image = Some(image);
@@ -377,16 +435,17 @@ impl ColdWallet {
                 self.state = AppState::Home;
             }
             Err(_) => {
-                // Encryption failure is a hardware-level event (e.g. RNG dead).
-                // Fall back to PinMismatch so the user is forced to retry rather
-                // than silently entering an unprotected state.
                 self.state = AppState::PinMismatch;
             }
         }
 
-        // Zero locals.
-        let mut a = digits; zero_sensitive(&mut a);
-        let mut b = pin;    zero_sensitive(&mut b);
+        let mut a = new_pin; zero_sensitive(&mut a);
+    }
+
+    /// True iff the state machine is parked in a deferred-work state and the
+    /// caller should redraw, then call `process_pending`.
+    pub fn has_pending_work(&self) -> bool {
+        matches!(self.state, AppState::PinVerifying { .. } | AppState::PinConfirming { .. })
     }
 
     fn derive_address(&mut self, passphrase: &str) {
@@ -512,8 +571,11 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
             step_sign_result(x, y),
         AppState::RestoreWallet { word_idx, buf, buf_len, confirmed, error } =>
             step_restore_wallet(x, y, word_idx, buf, buf_len, confirmed, error),
-        // Terminal / not-yet-implemented states accept no input.
-        AppState::PinLocked | AppState::ChangePin =>
+        // Terminal / not-yet-implemented / deferred-work states ignore input.
+        AppState::PinLocked
+        | AppState::ChangePin
+        | AppState::PinVerifying { .. }
+        | AppState::PinConfirming { .. } =>
             no_change(state),
     }
 }
@@ -591,9 +653,9 @@ fn step_set_pin(x: i32, y: i32, seed: u32, order: [u8; 10], mut digits: [u8; 6],
     }
 }
 
-/// Builds digits one tap at a time. Resolution of `digits == pin` happens in
-/// `ColdWallet::resolve_confirm_pin` once `len == 6` so that side effects
-/// (encryption, persistence) stay out of the pure state-machine layer.
+/// Builds digits one tap at a time. The cheap phase (`begin_confirm_pin`) runs
+/// in `handle_event` once `len == 6`; the slow encryption pass runs later in
+/// `process_pin_confirming` via `process_pending`.
 fn step_confirm_pin(x: i32, y: i32, pin: [u8; 6], order: [u8; 10], mut digits: [u8; 6], len: u8) -> StepResult {
     if let Some(digit) = pin_digit_at(x, y, &order) {
         if len < 6 {
@@ -613,8 +675,9 @@ fn step_pin_mismatch(seed: u32) -> StepResult {
     (AppState::SetPin { order: shuffle(seed), digits: [0u8; 6], len: 0 }, None, None, None)
 }
 
-/// Builds digits one tap at a time. Verification + write-ahead persistence
-/// happen in `ColdWallet::resolve_enter_pin` once `len == 6`.
+/// Builds digits one tap at a time. The cheap phase (`begin_enter_pin`) runs
+/// in `handle_event` once `len == 6`; cold-start AEAD verification runs later
+/// in `process_pin_verifying` via `process_pending`.
 fn step_enter_pin(
     x: i32, y: i32,
     order: [u8; 10], mut digits: [u8; 6], len: u8,
@@ -881,8 +944,11 @@ mod tests {
 
     /// Drive `wallet.handle_event` with a touch at (x,y), seeded entropy, no-op persist.
     fn touch(wallet: &mut ColdWallet, x: i32, y: i32, seed: u32) {
-        let (event, _) = create_touch_event_with_entropy(x, y, seed);
+        let (event, entropy) = create_touch_event_with_entropy(x, y, seed);
         wallet.handle_event(event, &mut |_: &_| {});
+        if wallet.has_pending_work() {
+            wallet.process_pending(entropy, &mut |_: &_| {});
+        }
     }
 
     /// Creates a touch event with reproducible entropy derived from a seed.
@@ -1007,8 +1073,8 @@ mod tests {
     // ── PIN UI tests (no encryption needed — disk_image stays None) ──────
 
     /// Builds digits without going through encryption: handle_event will land in
-    /// EnterPin{len:6}, resolve_enter_pin runs and, because disk_image is None
-    /// and self.pin is set, falls back to plain in-memory PIN comparison.
+    /// EnterPin{len:6}, begin_enter_pin runs and, because self.pin is set and
+    /// disk_image is None, finalize_enter_pin is called inline (no parking).
     fn build_wallet_with_pin(pin: [u8; 6]) -> ColdWallet {
         let mut w = ColdWallet::new();
         w.pin = Some(pin);
@@ -1141,8 +1207,11 @@ mod tests {
         for &digit in &pin {
             let pos = digit as usize; // ORDER is identity, so pos == digit
             let (x, y) = pin_key_pos(pos);
-            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 7);
+            let (event, entropy) = create_touch_event_with_entropy(x + 1, y + 1, 7);
             w.handle_event(event, &mut persist);
+            if w.has_pending_work() {
+                w.process_pending(entropy, &mut persist);
+            }
         }
         let image = captured.expect("persist must have been called");
         (w, image)
@@ -1204,8 +1273,11 @@ mod tests {
         for &digit in &wrong {
             let pos = order.iter().position(|&d| d == digit).unwrap();
             let (x, y) = pin_key_pos(pos);
-            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 12);
+            let (event, entropy) = create_touch_event_with_entropy(x + 1, y + 1, 12);
             w.handle_event(event, &mut persist);
+            if w.has_pending_work() {
+                w.process_pending(entropy, &mut persist);
+            }
         }
 
         assert_eq!(w.failures, 1);
@@ -1238,8 +1310,11 @@ mod tests {
             for &digit in &wrong {
                 let pos = order.iter().position(|&d| d == digit).unwrap();
                 let (x, y) = pin_key_pos(pos);
-                let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 13);
+                let (event, entropy) = create_touch_event_with_entropy(x + 1, y + 1, 13);
                 w.handle_event(event, &mut persist);
+                if w.has_pending_work() {
+                    w.process_pending(entropy, &mut persist);
+                }
             }
         }
         assert_eq!(w.state, AppState::PinLocked);
@@ -1268,8 +1343,11 @@ mod tests {
 
         for pos in 0..6 {
             let (x, y) = pin_key_pos(pos);
-            let (event, _) = create_touch_event_with_entropy(x + 1, y + 1, 99);
+            let (event, entropy) = create_touch_event_with_entropy(x + 1, y + 1, 99);
             w.handle_event(event, &mut persist);
+            if w.has_pending_work() {
+                w.process_pending(entropy, &mut persist);
+            }
         }
 
         assert_eq!(w.state, AppState::Home);

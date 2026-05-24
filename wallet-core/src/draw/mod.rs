@@ -44,6 +44,8 @@ where
         AppState::ConfirmPin { order, len, .. }    => pin::draw(display, &order, len, true)?,
         AppState::PinMismatch                      => pin::draw_mismatch(display)?,
         AppState::PinLocked                        => pin::draw_locked(display)?,
+        AppState::PinVerifying { .. }              => pin::draw_verifying(display, "Verifying PIN…")?,
+        AppState::PinConfirming { .. }             => pin::draw_verifying(display, "Saving wallet…")?,
         AppState::EnterPin { order, len, .. }      => pin::draw(display, &order, len, false)?,
         AppState::RestoreWallet { word_idx, buf, buf_len, error, .. }
                                                    => restore::draw(display, word_idx, &buf, buf_len, error)?,

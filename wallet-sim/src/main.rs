@@ -87,6 +87,8 @@ fn state_name(state: AppState) -> &'static str {
         About                  => "About",
         PinMismatch            => "PinMismatch",
         PinLocked              => "PinLocked",
+        PinVerifying { .. }    => "PinVerifying",
+        PinConfirming { .. }   => "PinConfirming",
     }
 }
 
@@ -324,7 +326,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     'running: loop {
         window.update(&display);
 
-        for event in window.events() {
+        // Collect into an owned Vec so the immutable borrow of `window` is
+        // released before the loop body, allowing `window.update()` inside.
+        #[allow(clippy::needless_collect)]
+        let events: Vec<_> = window.events().collect();
+        for event in events {
             match event {
                 SimulatorEvent::Quit => break 'running,
                 SimulatorEvent::MouseButtonUp { mouse_btn: MouseButton::Left, point } => {
@@ -358,12 +364,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let after = wallet.get_state();
                     if before != after {
                         log_transition(before, after);
-                        if matches!(before, AppState::ConfirmPin { .. })
-                            && matches!(after, AppState::Home)
-                        {
-                            println!("[WALLET] Wallet saved (encrypted) to {}", wallet_path().display());
-                        }
                         draw_ui(&mut display, &wallet)?;
+                    }
+
+                    // Two-phase resolution: if the input parked us in a
+                    // verifying/confirming state, we just drew the spinner;
+                    // now perform the heavy PBKDF2 + AEAD pass and redraw.
+                    if wallet.has_pending_work() {
+                        // Push the spinner frame to the screen *before* blocking
+                        // on the KDF — without this, SDL may batch the draw
+                        // with the post-KDF redraw and the user sees nothing.
+                        window.update(&display);
+                        let mid = wallet.get_state();
+                        wallet.process_pending(entropy(), &mut persist);
+                        let resolved = wallet.get_state();
+                        if mid != resolved {
+                            log_transition(mid, resolved);
+                            if matches!(mid, AppState::PinConfirming { .. })
+                                && matches!(resolved, AppState::Home)
+                            {
+                                println!("[WALLET] Wallet saved (encrypted) to {}", wallet_path().display());
+                            }
+                            draw_ui(&mut display, &wallet)?;
+                        }
                     }
                 }
                 _ => {}

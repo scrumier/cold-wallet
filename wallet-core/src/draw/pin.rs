@@ -67,6 +67,26 @@ where
     Ok(())
 }
 
+/// Drawn while the PIN-derived key is being computed (≈500ms release / 2-3s
+/// debug). Without this feedback the screen looks frozen.
+pub fn draw_verifying<D>(display: &mut D, label: &str) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let big   = white_text();
+    let small = MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_GRAY);
+
+    Text::with_alignment(label, Point::new(SCREEN_W / 2, SCREEN_H / 2 - 10), big, Center)
+        .draw(display)?;
+    Text::with_alignment(
+        "deriving encryption key — please wait",
+        Point::new(SCREEN_W / 2, SCREEN_H / 2 + 25),
+        small, Center,
+    )
+    .draw(display)?;
+    Ok(())
+}
+
 pub fn draw_locked<D>(display: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
