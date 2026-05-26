@@ -7,7 +7,7 @@ use k256::{
     elliptic_curve::PrimeField,
     schnorr::SigningKey,
 };
-use crate::derive::tap_keypair;
+use crate::derive::{tap_keypair, taproot_tweak_pub};
 use crate::psbt::ParsedPsbt;
 use crate::sighash::taproot_sighash;
 
@@ -15,6 +15,26 @@ use crate::sighash::taproot_sighash;
 pub enum SignError {
     KeyDerivation,
     NoMatchingInput,
+    /// Input specifies a sighash type other than SIGHASH_ALL (0x00 or 0x01).
+    UnsupportedSighash,
+    /// Input has no witness UTXO loaded (script_len == 0); cannot commit to amount/scriptPubKey.
+    MissingWitnessUtxo,
+    /// Input's witness UTXO scriptPubKey is not the P2TR output of our own
+    /// tweaked key, even though its `tap_internal_key` matched ours. A correct
+    /// PSBT can never trigger this; it means the host supplied a bogus UTXO.
+    WitnessProgramMismatch,
+}
+
+impl core::fmt::Display for SignError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::KeyDerivation      => f.write_str("key derivation failed"),
+            Self::NoMatchingInput    => f.write_str("no input matched the wallet key"),
+            Self::UnsupportedSighash => f.write_str("unsupported sighash type (only SIGHASH_ALL accepted)"),
+            Self::MissingWitnessUtxo => f.write_str("input is missing witness UTXO data"),
+            Self::WitnessProgramMismatch => f.write_str("input UTXO is not our own P2TR output"),
+        }
+    }
 }
 
 /// Signs all PSBT inputs whose `tap_internal_key` matches the wallet's derived key.
@@ -32,10 +52,33 @@ pub fn sign_psbt(psbt: &mut ParsedPsbt, seed: &[u8; 64], aux_rand: &[u8; 32]) ->
         unsafe { core::ptr::write_volatile(b, 0); }
     }
 
+    // The 32-byte witness program that a UTXO we can actually spend must carry.
+    let our_output_key = taproot_tweak_pub(&internal_key).ok_or(SignError::KeyDerivation)?;
+
     let mut count = 0usize;
     for i in 0..psbt.input_count {
         let Some(tap_ik) = psbt.inputs[i].tap_internal_key else { continue };
         if tap_ik != internal_key { continue }
+
+        // Guard: must have witness UTXO loaded to commit to amount/scriptPubKey.
+        if psbt.inputs[i].script_len == 0 {
+            return Err(SignError::MissingWitnessUtxo);
+        }
+
+        // Guard: the witness UTXO must be our own P2TR output. Taproot already
+        // commits scriptPubKey + amount into the sighash, so a forged UTXO can
+        // only ever yield an unusable signature — but refusing up front keeps us
+        // from emitting signatures for inputs we do not actually own.
+        let spk = &psbt.inputs[i].script_pubkey[..psbt.inputs[i].script_len];
+        if spk.len() != 34 || spk[0] != 0x51 || spk[1] != 0x20 || spk[2..] != our_output_key {
+            return Err(SignError::WitnessProgramMismatch);
+        }
+
+        // Guard: refuse sighash types other than SIGHASH_ALL (0x00 default or 0x01 explicit).
+        match psbt.inputs[i].sighash_type {
+            None | Some(0) | Some(1) => {}
+            Some(_) => return Err(SignError::UnsupportedSighash),
+        }
 
         let sighash = taproot_sighash(psbt, i);
         let sig_result: Result<k256::schnorr::Signature, _> =
@@ -125,6 +168,7 @@ mod tests {
             script_len: 34,
             tap_internal_key: Some(internal_key),
             tap_key_sig: None,
+            sighash_type: None,
         };
         psbt.output_count = 1;
         psbt.outputs[0] = TxOutput {
@@ -195,5 +239,58 @@ mod tests {
         psbt.inputs[0].tap_internal_key = None;
         let result = sign_psbt(&mut psbt, &seed, &[0u8; 32]);
         assert_eq!(result, Err(SignError::NoMatchingInput));
+    }
+
+    // ── M4 sighash guard tests ────────────────────────────────────────────────
+
+    #[test]
+    fn rejects_unsupported_sighash_type() {
+        // sighash_type = Some(3) (SIGHASH_SINGLE) must be refused.
+        let seed = test_seed();
+        let mut psbt = make_test_psbt(&seed);
+        psbt.inputs[0].sighash_type = Some(3);
+        let result = sign_psbt(&mut psbt, &seed, &[0u8; 32]);
+        assert_eq!(result, Err(SignError::UnsupportedSighash));
+    }
+
+    #[test]
+    fn accepts_sighash_all_explicit() {
+        // sighash_type = Some(1) is SIGHASH_ALL explicit — must sign successfully.
+        let seed = test_seed();
+        let mut psbt = make_test_psbt(&seed);
+        psbt.inputs[0].sighash_type = Some(1);
+        let result = sign_psbt(&mut psbt, &seed, &[0u8; 32]);
+        assert!(result.is_ok(), "expected ok for sighash 1, got {result:?}");
+    }
+
+    #[test]
+    fn accepts_sighash_none_default() {
+        // sighash_type = None (not specified) defaults to SIGHASH_ALL — must sign.
+        let seed = test_seed();
+        let mut psbt = make_test_psbt(&seed);
+        psbt.inputs[0].sighash_type = None;
+        let result = sign_psbt(&mut psbt, &seed, &[0u8; 32]);
+        assert!(result.is_ok(), "expected ok for sighash None, got {result:?}");
+    }
+
+    #[test]
+    fn rejects_foreign_witness_program() {
+        // tap_internal_key matches ours, but the witness UTXO scriptPubKey is a
+        // P2TR output for a different key — must be refused.
+        let seed = test_seed();
+        let mut psbt = make_test_psbt(&seed);
+        psbt.inputs[0].script_pubkey[10] ^= 0xff; // corrupt the witness program
+        let result = sign_psbt(&mut psbt, &seed, &[0u8; 32]);
+        assert_eq!(result, Err(SignError::WitnessProgramMismatch));
+    }
+
+    #[test]
+    fn rejects_missing_witness_utxo() {
+        // script_len == 0 means no witness UTXO was loaded — must be refused.
+        let seed = test_seed();
+        let mut psbt = make_test_psbt(&seed);
+        psbt.inputs[0].script_len = 0;
+        let result = sign_psbt(&mut psbt, &seed, &[0u8; 32]);
+        assert_eq!(result, Err(SignError::MissingWitnessUtxo));
     }
 }

@@ -16,8 +16,6 @@ pub enum PsbtError {
     TooManyOutputs,
     ScriptTooLong,
     MissingUnsignedTx,
-    InputCountMismatch,
-    OutputCountMismatch,
     OutputBufTooSmall,
 }
 
@@ -37,14 +35,17 @@ pub struct TxInput {
     pub tap_internal_key: Option<[u8; 32]>,
     /// 64-byte Schnorr sig — set by signing.rs.
     pub tap_key_sig:      Option<[u8; 64]>,
+    /// SIGHASH_TYPE — from PSBT_IN_SIGHASH_TYPE (0x03), 4-byte LE u32 per BIP174.
+    /// None means not specified (treat as SIGHASH_ALL = 0x00).
+    pub sighash_type:     Option<u32>,
 }
 
 impl TxInput {
-    const fn zero() -> Self {
+    pub const fn zero() -> Self {
         Self {
             txid: [0u8; 32], vout: 0, sequence: 0xffff_ffff,
             amount_sats: 0, script_pubkey: [0u8; MAX_SPK_LEN], script_len: 0,
-            tap_internal_key: None, tap_key_sig: None,
+            tap_internal_key: None, tap_key_sig: None, sighash_type: None,
         }
     }
 }
@@ -126,8 +127,9 @@ impl<'a> Reader<'a> {
     }
 
     fn read_bytes(&mut self, n: usize) -> Option<&'a [u8]> {
-        let s = self.data.get(self.pos..self.pos + n)?;
-        self.pos += n;
+        let end = self.pos.checked_add(n)?;
+        let s = self.data.get(self.pos..end)?;
+        self.pos = end;
         Some(s)
     }
 
@@ -222,6 +224,11 @@ impl ParsedPsbt {
                         // PSBT_IN_WITNESS_UTXO = 0x01
                         Some(&0x01) if key.len() == 1 => {
                             parse_witness_utxo(value, &mut psbt.inputs[i])?;
+                        }
+                        // PSBT_IN_SIGHASH_TYPE = 0x03, value is 4-byte LE u32 (BIP174)
+                        Some(&0x03) if key.len() == 1 && value.len() == 4 => {
+                            let st = u32::from_le_bytes(value.try_into().unwrap_or([0u8; 4]));
+                            psbt.inputs[i].sighash_type = Some(st);
                         }
                         // PSBT_IN_TAP_INTERNAL_KEY = 0x12
                         Some(&0x12) if key.len() == 1 && value.len() == 32 => {
@@ -401,7 +408,7 @@ impl<'a> Writer<'a> {
     }
 
     fn bytes(&mut self, bs: &[u8]) -> Option<()> {
-        let end = self.pos + bs.len();
+        let end = self.pos.checked_add(bs.len())?;
         self.buf.get_mut(self.pos..end)?.copy_from_slice(bs);
         self.pos = end;
         Some(())
