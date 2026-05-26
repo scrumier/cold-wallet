@@ -101,6 +101,10 @@ pub struct ColdWallet {
     /// Latest on-disk image. `None` before the wallet has been persisted (i.e.
     /// during initial setup, before ConfirmPin succeeds).
     disk_image:         Option<[u8; PERSIST_BYTES]>,
+    /// Set to `true` when `load_psbt` fails to decode or parse the scanned QR.
+    /// Cleared on a successful parse and when leaving SignScan. The draw layer
+    /// can read this via `scan_error()` to show a "PSBT rejected — rescan" hint.
+    scan_error_flag:    bool,
 }
 
 impl ColdWallet {
@@ -120,6 +124,7 @@ impl ColdWallet {
             failures:           0,
             locked:             false,
             disk_image:         None,
+            scan_error_flag:    false,
         }
     }
 
@@ -158,6 +163,11 @@ impl ColdWallet {
     /// Current on-disk image. `None` if the wallet has never been persisted.
     pub fn disk_image(&self) -> Option<&[u8; PERSIST_BYTES]> { self.disk_image.as_ref() }
 
+    /// `true` iff the last `PsbtScanned` event was rejected (bad base64 or
+    /// invalid PSBT). Cleared on a successful parse and when leaving SignScan.
+    /// The draw layer reads this to show a "PSBT rejected — rescan" hint.
+    pub fn scan_error(&self) -> bool { self.scan_error_flag }
+
     /// Boots a wallet from a previously written disk image. The wallet starts
     /// in `EnterPin { gate: Unlock }` — or in `PinLocked` if the header says so.
     /// `shuffle_entropy` is fresh entropy used only to randomise the PIN pad order.
@@ -171,9 +181,8 @@ impl ColdWallet {
         w.state = if hdr.locked {
             AppState::PinLocked
         } else {
-            let seed_u32 = u32::from_le_bytes(shuffle_entropy[..4].try_into().unwrap());
             AppState::EnterPin {
-                order:  shuffle(seed_u32),
+                order:  shuffle(&shuffle_entropy),
                 digits: [0u8; 6], len: 0,
                 gate:   PinGate::Unlock,
             }
@@ -254,8 +263,9 @@ impl ColdWallet {
 
         // Clear PSBT state when navigating back to Home.
         if matches!(self.state, AppState::Home) {
-            self.psbt = None;
+            self.psbt            = None;
             self.signed_psbt_b64_len = 0;
+            self.scan_error_flag = false;
         }
     }
 
@@ -311,12 +321,11 @@ impl ColdWallet {
                 update_lockout(img, 0, false);
                 persist(img);
             }
-            let seed_u32 = u32::from_le_bytes(touch_entropy[..4].try_into().unwrap());
             self.state = match gate {
                 PinGate::Unlock       => AppState::Home,
                 PinGate::ShowMnemonic => AppState::ShowMnemonic { page: 0 },
                 PinGate::ChangePin    => AppState::SetPin {
-                    order: shuffle(seed_u32),
+                    order: shuffle(touch_entropy),
                     digits: [0u8; 6], len: 0,
                 },
             };
@@ -328,9 +337,8 @@ impl ColdWallet {
             }
             self.state = AppState::PinLocked;
         } else {
-            let seed_u32 = u32::from_le_bytes(touch_entropy[..4].try_into().unwrap());
             self.state = AppState::EnterPin {
-                order:  shuffle(seed_u32),
+                order:  shuffle(touch_entropy),
                 digits: [0u8; 6], len: 0,
                 gate,
             };
@@ -386,8 +394,12 @@ impl ColdWallet {
         persist:       &mut F,
     ) {
         // Cold-start: try to decrypt the disk image with the typed PIN.
+        //
+        // Security: `key` is derived from the typed PIN and must be zeroed on
+        // the failure path so a wrong-PIN guess does not linger on the stack.
+        // On success, `key` is moved into `self.enc_key` (no copy remains here).
         let correct = if let Some(ref img) = self.disk_image {
-            let key = crypto::derive_key(&digits, &self.salt);
+            let mut key = crypto::derive_key(&digits, &self.salt);
             match try_decrypt(img, &key) {
                 Ok(secrets) => {
                     self.entropy = secrets.entropy;
@@ -396,9 +408,15 @@ impl ColdWallet {
                     self.words   = generate_words(&self.entropy);
                     self.pin     = Some(digits);
                     self.enc_key = Some(key);
+                    // `key` was moved into `self.enc_key` — no copy remains here.
                     true
                 }
-                Err(_) => false,
+                Err(_) => {
+                    // Wrong PIN: zero the derived key so it does not linger on
+                    // the stack after this scope exits.
+                    zero_sensitive(&mut key);
+                    false
+                }
             }
         } else {
             false
@@ -460,12 +478,23 @@ impl ColdWallet {
     }
 
     /// Decodes a Base64 PSBT, parses it, and transitions to SignReview on success.
+    /// On decode or parse failure stays in SignScan and sets `scan_error_flag = true`
+    /// so the draw layer can show a "PSBT rejected — rescan" hint.
     fn load_psbt(&mut self, b64: &[u8]) {
         let mut raw = [0u8; MAX_PSBT_RAW];
-        let Some(raw_len) = base64::decode(b64, &mut raw) else { return };
-        if let Ok(parsed) = ParsedPsbt::parse(&raw[..raw_len]) {
-            self.psbt = Some(parsed);
-            self.state = AppState::SignReview;
+        let Some(raw_len) = base64::decode(b64, &mut raw) else {
+            self.scan_error_flag = true;
+            return;
+        };
+        match ParsedPsbt::parse(&raw[..raw_len]) {
+            Ok(parsed) => {
+                self.scan_error_flag = false;
+                self.psbt            = Some(parsed);
+                self.state           = AppState::SignReview;
+            }
+            Err(_) => {
+                self.scan_error_flag = true;
+            }
         }
     }
 
@@ -505,6 +534,21 @@ impl Drop for ColdWallet {
         zero_sensitive(&mut self.address);
         zero_sensitive(&mut self.signed_psbt_b64);
         zero_sensitive(&mut self.salt);
+
+        // Clear the mnemonic word pointers. `words` is `[&'static str; 24]`
+        // where each element points into the BIP39 static word-list. The
+        // *sequence of pointers* encodes the mnemonic: an attacker who reads
+        // freed memory can reconstruct the 24-word phrase from the pointer
+        // values alone, without needing the underlying string data. Overwrite
+        // every slot with a pointer to the empty string so the original
+        // sequence is no longer recoverable from this struct.
+        for slot in self.words.iter_mut() {
+            // SAFETY: volatile write prevents the compiler from treating these
+            // as dead stores and eliding them at optimisation time.
+            unsafe {
+                core::ptr::write_volatile(slot as *mut &'static str, "");
+            }
+        }
     }
 }
 
@@ -534,21 +578,20 @@ fn no_change(state: AppState) -> StepResult {
 fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> StepResult {
     // PsbtScanned is handled before step() is called (early return in handle_event).
     let WalletEvent::Touch { x, y, entropy } = event else { return no_change(state) };
-    let seed = u32::from_le_bytes([entropy[0], entropy[1], entropy[2], entropy[3]]);
 
     match state {
         AppState::Welcome =>
-            step_welcome(x, y, &entropy, seed),
+            step_welcome(x, y, &entropy),
         AppState::NewWallet { page } =>
-            step_new_wallet(x, y, seed, page),
+            step_new_wallet(x, y, page),
         AppState::EnterPassphrase { buf, len } =>
-            step_enter_passphrase(x, y, seed, buf, len),
+            step_enter_passphrase(x, y, &entropy, buf, len),
         AppState::SetPin { order, digits, len } =>
-            step_set_pin(x, y, seed, order, digits, len),
+            step_set_pin(x, y, &entropy, order, digits, len),
         AppState::ConfirmPin { pin, order, digits, len } =>
             step_confirm_pin(x, y, pin, order, digits, len),
         AppState::PinMismatch =>
-            step_pin_mismatch(seed),
+            step_pin_mismatch(&entropy),
         AppState::EnterPin { order, digits, len, gate } =>
             step_enter_pin(x, y, order, digits, len, gate, stored_pin),
         AppState::Home =>
@@ -558,7 +601,7 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
         AppState::Accounts =>
             step_accounts(x, y),
         AppState::Settings =>
-            step_settings(x, y, seed),
+            step_settings(x, y, &entropy),
         AppState::ShowMnemonic { page } =>
             step_show_mnemonic(x, y, page),
         AppState::About =>
@@ -582,7 +625,7 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
 
 // ── Per-state handlers ────────────────────────────────────────────────────────
 
-fn step_welcome(x: i32, y: i32, entropy: &[u8; 32], _seed: u32) -> StepResult {
+fn step_welcome(x: i32, y: i32, entropy: &[u8; 32]) -> StepResult {
     if in_rect(x, y, BTN_X, BTN_NEW_Y, BTN_W, BTN_H) {
         // Store entropy so derive_address() can reconstruct the mnemonic later.
         (AppState::NewWallet { page: 0 }, None, Some(generate_words(entropy)), Some(*entropy))
@@ -595,7 +638,7 @@ fn step_welcome(x: i32, y: i32, entropy: &[u8; 32], _seed: u32) -> StepResult {
     }
 }
 
-fn step_new_wallet(x: i32, y: i32, seed: u32, page: u8) -> StepResult {
+fn step_new_wallet(x: i32, y: i32, page: u8) -> StepResult {
     let is_prev = in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H);
     let is_next = in_rect(x, y, NAV_NEXT_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H);
 
@@ -606,12 +649,11 @@ fn step_new_wallet(x: i32, y: i32, seed: u32, page: u8) -> StepResult {
     } else if is_prev && page > 0 {
         (AppState::NewWallet { page: page - 1 }, None, None, None)
     } else {
-        let _ = seed;
         (AppState::NewWallet { page }, None, None, None)
     }
 }
 
-fn step_enter_passphrase(x: i32, y: i32, seed: u32, buf: [u8; 32], len: u8) -> StepResult {
+fn step_enter_passphrase(x: i32, y: i32, entropy: &[u8; 32], buf: [u8; 32], len: u8) -> StepResult {
     let next = match passphrase_key_at(x, y) {
         Some(KeyPress::Char(c)) if len < 32 => {
             let mut b = buf; b[len as usize] = c;
@@ -624,21 +666,21 @@ fn step_enter_passphrase(x: i32, y: i32, seed: u32, buf: [u8; 32], len: u8) -> S
         Some(KeyPress::Backspace) if len > 0 =>
             Some(AppState::EnterPassphrase { buf, len: len - 1 }),
         Some(KeyPress::Confirm) if len > 0 =>
-            Some(AppState::SetPin { order: shuffle(seed), digits: [0u8; 6], len: 0 }),
+            Some(AppState::SetPin { order: shuffle(entropy), digits: [0u8; 6], len: 0 }),
         Some(KeyPress::Skip) =>
-            Some(AppState::SetPin { order: shuffle(seed), digits: [0u8; 6], len: 0 }),
+            Some(AppState::SetPin { order: shuffle(entropy), digits: [0u8; 6], len: 0 }),
         _ => None,
     };
     (next.unwrap_or(AppState::EnterPassphrase { buf, len }), None, None, None)
 }
 
-fn step_set_pin(x: i32, y: i32, seed: u32, order: [u8; 10], mut digits: [u8; 6], len: u8) -> StepResult {
+fn step_set_pin(x: i32, y: i32, entropy: &[u8; 32], order: [u8; 10], mut digits: [u8; 6], len: u8) -> StepResult {
     if let Some(digit) = pin_digit_at(x, y, &order) {
         if len < 6 {
             digits[len as usize] = digit;
             let new_len = len + 1;
             if new_len == 6 {
-                (AppState::ConfirmPin { pin: digits, order: shuffle(seed), digits: [0u8; 6], len: 0 }, None, None, None)
+                (AppState::ConfirmPin { pin: digits, order: shuffle(entropy), digits: [0u8; 6], len: 0 }, None, None, None)
             } else {
                 (AppState::SetPin { order, digits, len: new_len }, None, None, None)
             }
@@ -648,7 +690,6 @@ fn step_set_pin(x: i32, y: i32, seed: u32, order: [u8; 10], mut digits: [u8; 6],
     } else if in_rect(x, y, PIN_DEL_X, PIN_DEL_Y, PIN_DEL_W, PIN_DEL_H) && len > 0 {
         (AppState::SetPin { order, digits, len: len - 1 }, None, None, None)
     } else {
-        let _ = seed;
         (AppState::SetPin { order, digits, len }, None, None, None)
     }
 }
@@ -671,8 +712,8 @@ fn step_confirm_pin(x: i32, y: i32, pin: [u8; 6], order: [u8; 10], mut digits: [
     }
 }
 
-fn step_pin_mismatch(seed: u32) -> StepResult {
-    (AppState::SetPin { order: shuffle(seed), digits: [0u8; 6], len: 0 }, None, None, None)
+fn step_pin_mismatch(entropy: &[u8; 32]) -> StepResult {
+    (AppState::SetPin { order: shuffle(entropy), digits: [0u8; 6], len: 0 }, None, None, None)
 }
 
 /// Builds digits one tap at a time. The cheap phase (`begin_enter_pin`) runs
@@ -728,15 +769,15 @@ fn step_accounts(x: i32, y: i32) -> StepResult {
     }
 }
 
-fn step_settings(x: i32, y: i32, seed: u32) -> StepResult {
+fn step_settings(x: i32, y: i32, entropy: &[u8; 32]) -> StepResult {
     if in_rect(x, y, SETTINGS_BTN_X, SETTINGS_Y0, SETTINGS_BTN_W, SETTINGS_BTN_H) {
         (AppState::EnterPin {
-            order: shuffle(seed), digits: [0u8; 6], len: 0,
+            order: shuffle(entropy), digits: [0u8; 6], len: 0,
             gate: PinGate::ShowMnemonic,
         }, None, None, None)
     } else if in_rect(x, y, SETTINGS_BTN_X, SETTINGS_Y1, SETTINGS_BTN_W, SETTINGS_BTN_H) {
         (AppState::EnterPin {
-            order: shuffle(seed), digits: [0u8; 6], len: 0,
+            order: shuffle(entropy), digits: [0u8; 6], len: 0,
             gate: PinGate::ChangePin,
         }, None, None, None)
     } else if in_rect(x, y, SETTINGS_BTN_X, SETTINGS_Y2, SETTINGS_BTN_W, SETTINGS_BTN_H) {
@@ -897,13 +938,32 @@ fn generate_words(entropy: &[u8; 32]) -> [&'static str; 24] {
 
 // ── PIN helpers ───────────────────────────────────────────────────────────────
 
-/// Fisher-Yates shuffle using LCG seeded by platform-provided entropy.
-pub fn shuffle(seed: u32) -> [u8; 10] {
+/// Fisher-Yates shuffle of the digits 0–9 for the anti-smudge PIN pad.
+///
+/// Folds all 256 bits of platform entropy into a 64-bit seed, then drives a
+/// splitmix64 PRNG for the swaps — far stronger than the previous 32-bit LCG
+/// seed (whose state could not even cover the 10! possible pads). On hardware,
+/// `entropy` must come from the TRNG; on the simulator it is `getrandom`.
+pub fn shuffle(entropy: &[u8; 32]) -> [u8; 10] {
+    let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+    for chunk in entropy.chunks_exact(8) {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(chunk);
+        s ^= u64::from_le_bytes(b);
+        s = s.rotate_left(17);
+    }
+    let mut next = || {
+        s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = s;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+
     let mut arr = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-    let mut s   = seed;
     for i in (1..10usize).rev() {
-        s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let j = (s >> 16) as usize % (i + 1);
+        // Bias is ~10/2⁶⁴ for a 64-bit draw over a range ≤ 10 — negligible.
+        let j = (next() % (i as u64 + 1)) as usize;
         arr.swap(i, j);
     }
     arr
@@ -1029,7 +1089,9 @@ mod tests {
 
     #[test]
     fn shuffle_is_permutation() {
-        let order = shuffle(0x1234_5678);
+        let mut ent = [0u8; 32];
+        for (i, b) in ent.iter_mut().enumerate() { *b = (i as u8).wrapping_mul(37).wrapping_add(5); }
+        let order = shuffle(&ent);
         let mut seen = [false; 10];
         for &d in &order {
             assert!(d < 10);
@@ -1358,5 +1420,51 @@ mod tests {
         assert!(!hdr.locked);
         // The salt in the wallet matches the salt in the persisted image.
         assert_eq!(hdr.salt, w.salt);
+    }
+
+    // ── M5: scan_error flag ───────────────────────────────────────────────
+
+    #[test]
+    fn load_psbt_bad_base64_sets_scan_error() {
+        let mut w = ColdWallet::new();
+        w.state = AppState::SignScan;
+        // Bytes that are not valid base64 (contains characters outside alphabet).
+        let bad_b64 = b"!!!not-valid-base64!!!";
+        let mut data = [0u8; 512];
+        let len = bad_b64.len().min(512);
+        data[..len].copy_from_slice(&bad_b64[..len]);
+        w.handle_event(WalletEvent::PsbtScanned { data, len }, &mut |_: &_| {});
+        assert!(w.scan_error(), "scan_error must be true after bad base64");
+        assert_eq!(w.state, AppState::SignScan, "must stay in SignScan");
+    }
+
+    #[test]
+    fn load_psbt_bad_psbt_bytes_sets_scan_error() {
+        let mut w = ColdWallet::new();
+        w.state = AppState::SignScan;
+        // "AAAA" is valid base64 that decodes to three zero bytes — not a
+        // valid PSBT, so ParsedPsbt::parse should return Err.
+        let garbage_b64 = b"AAAA";
+        let mut data = [0u8; 512];
+        data[..garbage_b64.len()].copy_from_slice(garbage_b64);
+        w.handle_event(WalletEvent::PsbtScanned { data, len: garbage_b64.len() }, &mut |_: &_| {});
+        assert!(w.scan_error(), "scan_error must be true after invalid PSBT bytes");
+        assert_eq!(w.state, AppState::SignScan);
+    }
+
+    #[test]
+    fn load_psbt_navigate_home_clears_scan_error() {
+        let mut w = ColdWallet::new();
+        w.state = AppState::SignScan;
+        // Set scan_error via a bad scan.
+        let mut data = [0u8; 512]; data[0] = b'!';
+        w.handle_event(WalletEvent::PsbtScanned { data, len: 1 }, &mut |_: &_| {});
+        assert!(w.scan_error(), "pre-condition: scan_error should be set");
+
+        // Navigate away to Home via the Back button — scan_error must clear.
+        let (home_event, _) = create_touch_event_with_entropy(NAV_PREV_X + 1, NAV_BTN_Y + 1, 77);
+        w.handle_event(home_event, &mut |_: &_| {});
+        assert_eq!(w.state, AppState::Home);
+        assert!(!w.scan_error(), "scan_error must clear when navigating to Home");
     }
 }

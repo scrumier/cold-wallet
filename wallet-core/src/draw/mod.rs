@@ -22,6 +22,7 @@ use embedded_graphics::text::{Alignment::Center, Text};
 use crate::psbt::ParsedPsbt;
 use crate::state::AppState;
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_ui<D>(
     display: &mut D,
     state: AppState,
@@ -30,6 +31,7 @@ pub fn draw_ui<D>(
     psbt: Option<&ParsedPsbt>,
     signed_b64: Option<&str>,
     our_output_key: Option<[u8; 32]>,
+    scan_error: bool,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
@@ -55,7 +57,7 @@ where
         AppState::Settings                         => settings::draw(display)?,
         AppState::ShowMnemonic { page }            => mnemonic::draw(display, page, words)?,
         AppState::About                            => about::draw(display)?,
-        AppState::SignScan                         => sign_scan::draw(display)?,
+        AppState::SignScan                         => sign_scan::draw(display, scan_error)?,
         AppState::SignReview                       => sign_review::draw(display, psbt, our_output_key)?,
         AppState::SignResult                       => sign_result::draw(display, signed_b64)?,
         _                                          => draw_placeholder(display, state)?,

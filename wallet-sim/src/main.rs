@@ -258,21 +258,23 @@ fn persist_blob(blob: &[u8; PERSIST_BYTES]) {
 }
 
 /// Loads the wallet from disk. Handles automatic migration from v1 (103 bytes,
-/// unencrypted) to v2 (143 bytes, ChaCha20-Poly1305 + PBKDF2 lockout header).
+/// unencrypted) to v3 (143 bytes, ChaCha20-Poly1305 + PBKDF2 + AAD-bound header).
 ///
 /// The migration is *transparent*: the user notices nothing other than a one-time
-/// extra delay at startup (≈500ms for PBKDF2 on the migrated PIN).
+/// extra delay at startup (PBKDF2 on the migrated PIN). A v2 blob (also 143 bytes
+/// but empty AAD) is accepted by size here and then cleanly rejected by
+/// `DiskHeader::parse` as a bad version — the user re-runs setup or restores.
 fn load_wallet_image() -> Option<[u8; PERSIST_BYTES]> {
     let bytes = std::fs::read(wallet_path()).ok()?;
     match bytes.len() {
         PERSIST_BYTES => bytes.try_into().ok(),
         103 if bytes[102] == 1 => {
-            println!("[WALLET] Legacy v1 wallet detected — migrating to v2 (encrypted)…");
+            println!("[WALLET] Legacy v1 wallet detected — migrating to v3 (encrypted)…");
             let v1: [u8; 103] = bytes.try_into().ok()?;
-            let v2 = migrate_v1_to_v2(&v1)?;
-            persist_blob(&v2);
+            let v3 = migrate_v1_to_v3(&v1)?;
+            persist_blob(&v3);
             println!("[WALLET] Migration complete.");
-            Some(v2)
+            Some(v3)
         }
         n => {
             eprintln!("[WALLET] Ignoring wallet.bin with unknown size {n}");
@@ -281,7 +283,7 @@ fn load_wallet_image() -> Option<[u8; PERSIST_BYTES]> {
     }
 }
 
-fn migrate_v1_to_v2(v1: &[u8; 103]) -> Option<[u8; PERSIST_BYTES]> {
+fn migrate_v1_to_v3(v1: &[u8; 103]) -> Option<[u8; PERSIST_BYTES]> {
     let mut ent  = [0u8; 32]; ent.copy_from_slice(&v1[0..32]);
     let mut seed = [0u8; 64]; seed.copy_from_slice(&v1[32..96]);
     let mut pin  = [0u8; 6];  pin.copy_from_slice(&v1[96..102]);

@@ -1,8 +1,8 @@
-//! On-disk persisted wallet (format v2).
+//! On-disk persisted wallet (format v3).
 //!
 //! Layout (143 bytes):
 //! ```text
-//!   [0]       version          = 2
+//!   [0]       version          = 3
 //!   [1]       failures         (plaintext — used for lockout enforcement before
 //!                                any decryption attempt)
 //!   [2]       locked           (0/1)
@@ -18,13 +18,33 @@
 //! (write-ahead) so that a power-cut between increment and check cannot reset
 //! the failure counter.
 //!
+//! v3 binds the version byte + salt as AEAD additional data (see `build_aad`),
+//! so a disk attacker cannot swap the salt or downgrade the version without
+//! failing the tag. v2 blobs (empty AAD) are rejected as `BadVersion`; there is
+//! no in-place migration because re-encryption requires the PIN — the user
+//! re-runs setup or restores from the 24-word backup.
+//!
 //! Migration from v1 (unencrypted 103-byte format) is handled at the call site
 //! (wallet-sim) using [`Secrets`] + [`encrypt_into_blob`].
 
 use crate::crypto::{self, CryptoError, KEY_LEN, NONCE_LEN, SALT_LEN, TAG_LEN};
 
-pub const VERSION_V2:   u8    = 2;
+pub const VERSION_V3:   u8    = 3;
 pub const PERSIST_BYTES: usize = 143;
+
+/// Bytes of the plaintext header that are authenticated as AEAD additional data:
+/// version byte + salt. Binding these means a disk attacker cannot swap the salt
+/// or downgrade the version without failing the Poly1305 tag. The lockout fields
+/// (failures/locked) are deliberately excluded — they change via `update_lockout`
+/// without re-encryption, so they cannot be covered by the ciphertext's tag.
+const AAD_LEN: usize = 1 + SALT_LEN;
+
+fn build_aad(version: u8, salt: &[u8; SALT_LEN]) -> [u8; AAD_LEN] {
+    let mut aad = [0u8; AAD_LEN];
+    aad[0] = version;
+    aad[1..].copy_from_slice(salt);
+    aad
+}
 
 const HDR_VERSION_OFF:  usize = 0;
 const HDR_FAILURES_OFF: usize = 1;
@@ -71,7 +91,7 @@ pub struct DiskHeader {
 impl DiskHeader {
     /// Validates the version byte and extracts the header fields.
     pub fn parse(blob: &[u8; PERSIST_BYTES]) -> Result<Self, DiskError> {
-        if blob[HDR_VERSION_OFF] != VERSION_V2 { return Err(DiskError::BadVersion); }
+        if blob[HDR_VERSION_OFF] != VERSION_V3 { return Err(DiskError::BadVersion); }
         let mut salt = [0u8; SALT_LEN];
         salt.copy_from_slice(&blob[HDR_SALT_OFF..HDR_SALT_OFF + SALT_LEN]);
         Ok(Self {
@@ -89,24 +109,33 @@ pub fn try_decrypt(blob: &[u8; PERSIST_BYTES], key: &[u8; KEY_LEN]) -> Result<Se
     let mut nonce = [0u8; NONCE_LEN];
     nonce.copy_from_slice(&blob[NONCE_OFF..NONCE_OFF + NONCE_LEN]);
 
+    let mut salt = [0u8; SALT_LEN];
+    salt.copy_from_slice(&blob[HDR_SALT_OFF..HDR_SALT_OFF + SALT_LEN]);
+    let aad = build_aad(blob[HDR_VERSION_OFF], &salt);
+
     let mut buf = [0u8; CIPHER_LEN];
     buf.copy_from_slice(&blob[CIPHER_OFF..CIPHER_OFF + CIPHER_LEN]);
 
     let mut tag = [0u8; TAG_LEN];
     tag.copy_from_slice(&blob[TAG_OFF..TAG_OFF + TAG_LEN]);
 
-    crypto::decrypt(key, &nonce, &mut buf, &tag)?;
+    let result = crypto::decrypt(key, &nonce, &aad, &mut buf, &tag);
 
-    let mut entropy = [0u8; 32];
-    let mut seed    = [0u8; 64];
-    entropy.copy_from_slice(&buf[..32]);
-    seed.copy_from_slice(&buf[32..]);
-    // Wipe the working buffer before returning.
+    let secrets = result.map(|()| {
+        let mut entropy = [0u8; 32];
+        let mut seed    = [0u8; 64];
+        entropy.copy_from_slice(&buf[..32]);
+        seed.copy_from_slice(&buf[32..]);
+        Secrets { entropy, seed }
+    });
+
+    // Wipe the working buffer on every path — on AEAD failure it holds the
+    // (garbage) decrypted-with-wrong-key bytes, but we zero it regardless.
     for b in buf.iter_mut() { unsafe { core::ptr::write_volatile(b, 0); } }
-    Ok(Secrets { entropy, seed })
+    Ok(secrets?)
 }
 
-/// Encrypts secrets and assembles a complete v2 disk image.
+/// Encrypts secrets and assembles a complete v3 disk image.
 pub fn encrypt_into_blob(
     secrets:  &Secrets,
     salt:     &[u8; SALT_LEN],
@@ -119,10 +148,11 @@ pub fn encrypt_into_blob(
     buf[..32].copy_from_slice(&secrets.entropy);
     buf[32..].copy_from_slice(&secrets.seed);
 
-    let tag = crypto::encrypt(key, nonce, &mut buf)?;
+    let aad = build_aad(VERSION_V3, salt);
+    let tag = crypto::encrypt(key, nonce, &aad, &mut buf)?;
 
     let mut out = [0u8; PERSIST_BYTES];
-    out[HDR_VERSION_OFF]  = VERSION_V2;
+    out[HDR_VERSION_OFF]  = VERSION_V3;
     out[HDR_FAILURES_OFF] = failures;
     out[HDR_LOCKED_OFF]   = u8::from(locked);
     out[HDR_SALT_OFF..HDR_SALT_OFF + SALT_LEN].copy_from_slice(salt);
@@ -162,7 +192,7 @@ mod tests {
         let key   = [0xccu8; KEY_LEN];
 
         let blob = encrypt_into_blob(&s, &salt, &nonce, &key, 0, false).unwrap();
-        assert_eq!(blob[0], VERSION_V2);
+        assert_eq!(blob[0], VERSION_V3);
 
         let hdr = DiskHeader::parse(&blob).unwrap();
         assert_eq!(hdr.failures, 0);

@@ -10,11 +10,12 @@ use crate::layout::{SCREEN_W, SIGN_VF_X, SIGN_VF_Y, SIGN_VF_W, SIGN_VF_H,
                     NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H};
 use super::{draw_button, white_stroke, white_text};
 
-pub fn draw<D>(display: &mut D) -> Result<(), D::Error>
+pub fn draw<D>(display: &mut D, scan_error: bool) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let small = MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_GRAY);
+    let small  = MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_GRAY);
+    let yellow = MonoTextStyle::new(&FONT_6X10, Rgb565::CSS_YELLOW);
 
     Text::with_alignment("Scan PSBT QR", Point::new(SCREEN_W / 2, 45), white_text(), Center)
         .draw(display)?;
@@ -26,6 +27,13 @@ where
     Text::with_alignment("[tap to simulate scan]",
         Point::new(SCREEN_W / 2, SIGN_VF_Y + SIGN_VF_H / 2 + 7), small, Center)
         .draw(display)?;
+
+    // Feedback when the last scanned QR was rejected (bad base64 / invalid PSBT).
+    if scan_error {
+        Text::with_alignment("PSBT rejected - rescan a valid QR",
+            Point::new(SCREEN_W / 2, SIGN_VF_Y + SIGN_VF_H + 25), yellow, Center)
+            .draw(display)?;
+    }
 
     draw_button(display, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H, "Cancel", white_stroke(2), white_text())?;
 

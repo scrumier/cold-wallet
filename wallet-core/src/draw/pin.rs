@@ -104,7 +104,7 @@ where
     )
     .draw(display)?;
     Text::with_alignment(
-        "Restart the device to try again.",
+        "Lockout is permanent — restore from your 24-word backup.",
         Point::new(SCREEN_W / 2, SCREEN_H / 2 + 30),
         small,
         Center,
