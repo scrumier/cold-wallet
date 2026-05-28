@@ -297,7 +297,7 @@ impl ColdWallet {
 
         if let Some(stored) = self.pin {
             // In-session fast path: plain comparison, resolve immediately.
-            let correct = stored == digits;
+            let correct = ct_eq_pin(&stored, &digits);
             self.finalize_enter_pin(correct, gate, touch_entropy, persist);
         } else {
             // Cold-start path: AEAD verification is slow — park in PinVerifying
@@ -348,16 +348,17 @@ impl ColdWallet {
     /// Cheap phase of ConfirmPin resolution. Compares the entered digits to
     /// the originally chosen PIN. On mismatch → PinMismatch. On match → parks
     /// in `PinConfirming` for the slow encryption pass.
-    fn begin_confirm_pin(&mut self, pin: [u8; 6], digits: [u8; 6]) {
-        if digits != pin {
+    fn begin_confirm_pin(&mut self, mut pin: [u8; 6], mut digits: [u8; 6]) {
+        if !ct_eq_pin(&digits, &pin) {
             self.state = AppState::PinMismatch;
-            let mut a = digits; zero_sensitive(&mut a);
-            let mut b = pin;    zero_sensitive(&mut b);
+            zero_sensitive(&mut digits);
+            zero_sensitive(&mut pin);
             return;
         }
+        // digits is Copy — copied into PinConfirming; zero the local copy after.
         self.state = AppState::PinConfirming { new_pin: digits };
-        let mut a = digits; zero_sensitive(&mut a);
-        let mut b = pin;    zero_sensitive(&mut b);
+        zero_sensitive(&mut digits);
+        zero_sensitive(&mut pin);
     }
 
     /// Runs the deferred slow work when the state machine is parked in
@@ -388,7 +389,7 @@ impl ColdWallet {
 
     fn process_pin_verifying<F: FnMut(&[u8; PERSIST_BYTES])>(
         &mut self,
-        digits:        [u8; 6],
+        mut digits:    [u8; 6],
         gate:          PinGate,
         fresh_entropy: &[u8; 32],
         persist:       &mut F,
@@ -422,15 +423,15 @@ impl ColdWallet {
             false
         };
 
-        let mut scratch = digits;
-        zero_sensitive(&mut scratch);
+        // digits was Copy'd into self.pin on success; zero the local parameter copy.
+        zero_sensitive(&mut digits);
 
         self.finalize_enter_pin(correct, gate, fresh_entropy, persist);
     }
 
     fn process_pin_confirming<F: FnMut(&[u8; PERSIST_BYTES])>(
         &mut self,
-        new_pin:       [u8; 6],
+        mut new_pin:   [u8; 6],
         fresh_entropy: &[u8; 32],
         persist:       &mut F,
     ) {
@@ -457,7 +458,8 @@ impl ColdWallet {
             }
         }
 
-        let mut a = new_pin; zero_sensitive(&mut a);
+        // new_pin was Copy'd into self.pin on success; zero the local parameter copy.
+        zero_sensitive(&mut new_pin);
     }
 
     /// True iff the state machine is parked in a deferred-work state and the
@@ -468,12 +470,14 @@ impl ColdWallet {
 
     fn derive_address(&mut self, passphrase: &str) {
         if let Ok(m) = Mnemonic::from_entropy(&self.entropy) {
-            let seed = m.to_seed_normalized(passphrase);
+            let mut seed = m.to_seed_normalized(passphrase);
             debug_assert!(taproot_address(&seed).is_some(), "taproot derivation failed");
             if let Some(addr) = taproot_address(&seed) {
                 self.address = addr;
-                self.seed    = seed;
+                self.seed    = seed; // seed is Copy — self.seed now holds it
             }
+            // Zero the local copy regardless of derivation success.
+            for b in seed.iter_mut() { unsafe { core::ptr::write_volatile(b, 0); } }
         }
     }
 
@@ -564,6 +568,13 @@ fn zero_sensitive<const N: usize>(buf: &mut [u8; N]) {
         // SAFETY: volatile write prevents the compiler from eliding this zeroing.
         unsafe { core::ptr::write_volatile(b, 0); }
     }
+}
+
+/// Compares two PIN arrays without early exit to avoid timing side channels.
+fn ct_eq_pin(a: &[u8; 6], b: &[u8; 6]) -> bool {
+    let mut diff: u8 = 0;
+    for i in 0..6 { diff |= a[i] ^ b[i]; }
+    diff == 0
 }
 
 // (new_state, pin_to_store, words_to_store, entropy_to_store)

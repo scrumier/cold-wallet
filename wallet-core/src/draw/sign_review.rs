@@ -38,10 +38,11 @@ where
 
     if let Some(p) = psbt {
         // ── Classify all outputs ───────────────────────────────────────────
-        let mut send_total:   u64 = 0;
-        let     total_in:     u64 = p.total_in();
-        let     total_out:    u64 = p.total_out();
-        let     fee:          u64 = total_in.saturating_sub(total_out);
+        let mut send_total:    u64  = 0;
+        let     total_in:      u64  = p.total_in();
+        let     total_out:     u64  = p.total_out();
+        let     output_overflow: bool = total_out > total_in;
+        let     fee:           u64  = total_in.saturating_sub(total_out);
 
         for i in 0..p.output_count {
             let out = &p.outputs[i];
@@ -66,7 +67,14 @@ where
         }
 
         // Fee abnormality warning (shown below the header row)
-        if fee_is_abnormal(fee, send_total, total_in) {
+        if output_overflow {
+            Text::with_alignment(
+                "! OUTPUTS EXCEED INPUTS — invalid tx !",
+                Point::new(cx, 50),
+                yellow,
+                Center,
+            ).draw(display)?;
+        } else if fee_is_abnormal(fee, send_total, total_in) {
             Text::with_alignment(
                 "! HIGH FEE — verify before signing !",
                 Point::new(cx, 50),

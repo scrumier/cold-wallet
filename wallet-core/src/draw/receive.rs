@@ -109,6 +109,25 @@ where
     Ok(())
 }
 
+fn draw_qr_placeholder<D>(display: &mut D) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    Rectangle::new(Point::new(QR_X, QR_Y), Size::new(QR_SIZE as u32, QR_SIZE as u32))
+        .into_styled(white_stroke(2))
+        .draw(display)?;
+
+    Text::with_alignment(
+        "QR",
+        Point::new(SCREEN_W / 2, QR_Y + QR_SIZE / 2 + 7),
+        white_text(),
+        Center,
+    )
+    .draw(display)?;
+
+    Ok(())
+}
+
 #[cfg(not(feature = "std"))]
 fn draw_qr<D>(display: &mut D, _address: &str) -> Result<(), D::Error>
 where
@@ -138,23 +157,4 @@ mod tests {
         // 62 uppercase alphanumeric chars with EcLevel::M → Version 4 (33×33 modules).
         assert_eq!(qr.width(), 33, "unexpected QR version for a 62-char bc1p address");
     }
-}
-
-fn draw_qr_placeholder<D>(display: &mut D) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = Rgb565>,
-{
-    Rectangle::new(Point::new(QR_X, QR_Y), Size::new(QR_SIZE as u32, QR_SIZE as u32))
-        .into_styled(white_stroke(2))
-        .draw(display)?;
-
-    Text::with_alignment(
-        "QR",
-        Point::new(SCREEN_W / 2, QR_Y + QR_SIZE / 2 + 7),
-        white_text(),
-        Center,
-    )
-    .draw(display)?;
-
-    Ok(())
 }

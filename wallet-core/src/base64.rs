@@ -133,7 +133,7 @@ mod tests {
     fn round_trip_unaligned() {
         for len in 0..=16usize {
             let src: Vec<u8> = (0..len).map(|i| i as u8).collect();
-            let mut enc = vec![0u8; (len + 2) / 3 * 4 + 4];
+            let mut enc = vec![0u8; len.div_ceil(3) * 4 + 4];
             let enc_len = encode(&src, &mut enc);
             let mut dec = vec![0u8; len + 4];
             let dec_len = decode(&enc[..enc_len], &mut dec).unwrap();
