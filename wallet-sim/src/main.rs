@@ -83,7 +83,6 @@ fn state_name(state: AppState) -> &'static str {
             0 => "ShowMnemonic(1/4)", 1 => "ShowMnemonic(2/4)",
             2 => "ShowMnemonic(3/4)", _ => "ShowMnemonic(4/4)",
         },
-        ChangePin              => "ChangePin",
         About                  => "About",
         PinMismatch            => "PinMismatch",
         PinLocked              => "PinLocked",

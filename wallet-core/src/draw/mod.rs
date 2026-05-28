@@ -60,25 +60,7 @@ where
         AppState::SignScan                         => sign_scan::draw(display, scan_error)?,
         AppState::SignReview                       => sign_review::draw(display, psbt, our_output_key)?,
         AppState::SignResult                       => sign_result::draw(display, signed_b64)?,
-        _                                          => draw_placeholder(display, state)?,
     }
-
-    Ok(())
-}
-
-fn draw_placeholder<D>(display: &mut D, state: AppState) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = Rgb565>,
-{
-    let label = match state {
-        AppState::SignScan      => "Scan QR",
-        AppState::SignReview    => "Review TX",
-        AppState::SignResult    => "Signed QR",
-        AppState::ChangePin     => "Change PIN",
-        _                       => "—",
-    };
-
-    Text::with_alignment(label, Point::new(400, 240), white_text(), Center).draw(display)?;
 
     Ok(())
 }

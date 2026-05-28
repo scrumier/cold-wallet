@@ -55,7 +55,6 @@ pub enum AppState {
     Accounts,
     Settings,
     ShowMnemonic     { page: u8 },
-    ChangePin,
     About,
 }
 
@@ -440,12 +439,15 @@ impl ColdWallet {
         salt.copy_from_slice(&fresh_entropy[..SALT_LEN]);
         nonce.copy_from_slice(&fresh_entropy[SALT_LEN..SALT_LEN + NONCE_LEN]);
 
-        let key = crypto::derive_key(&new_pin, &salt);
+        // `key` is `[u8; KEY_LEN]` (Copy). It is zeroed on both branches so the
+        // PBKDF2-derived bytes don't linger on the stack if encryption fails.
+        let mut key = crypto::derive_key(&new_pin, &salt);
         let secrets = Secrets { entropy: self.entropy, seed: self.seed };
         match encrypt_into_blob(&secrets, &salt, &nonce, &key, 0, false) {
             Ok(image) => {
                 self.salt       = salt;
-                self.enc_key    = Some(key);
+                self.enc_key    = Some(key); // key is Copy — local still alive
+                zero_sensitive(&mut key);    // zero the local copy
                 self.pin        = Some(new_pin);
                 self.failures   = 0;
                 self.locked     = false;
@@ -454,6 +456,7 @@ impl ColdWallet {
                 self.state = AppState::Home;
             }
             Err(_) => {
+                zero_sensitive(&mut key); // zero key — wrong-PIN derived bytes must not linger
                 self.state = AppState::PinMismatch;
             }
         }
@@ -625,9 +628,8 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
             step_sign_result(x, y),
         AppState::RestoreWallet { word_idx, buf, buf_len, confirmed, error } =>
             step_restore_wallet(x, y, word_idx, buf, buf_len, confirmed, error),
-        // Terminal / not-yet-implemented / deferred-work states ignore input.
+        // Terminal / deferred-work states ignore input.
         AppState::PinLocked
-        | AppState::ChangePin
         | AppState::PinVerifying { .. }
         | AppState::PinConfirming { .. } =>
             no_change(state),
