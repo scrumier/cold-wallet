@@ -770,6 +770,7 @@ dependencies = [
  "embedded-graphics",
  "k256",
  "qrcode",
+ "zeroize",
 ]
 
 [[package]]

@@ -5,6 +5,7 @@
 
 use bip32::{ChildNumber, XPrv};
 use bitcoin_hashes::{sha256, HashEngine};
+use zeroize::Zeroize;
 use k256::{
     AffinePoint, ProjectivePoint, Scalar,
     elliptic_curve::{
@@ -45,7 +46,19 @@ pub fn tap_keypair(seed: &[u8; 64]) -> Option<([u8; 32], [u8; 32])> {
     // unconditionally on both success and failure paths before returning.
     let privkey_maybe: Option<[u8; 32]> = if compressed.as_bytes()[0] == 0x03 {
         let opt: Option<Scalar> = Scalar::from_repr(raw_privkey.into()).into();
-        opt.map(|d| { let neg: [u8; 32] = (-d).to_repr().into(); neg })
+        opt.map(|mut d| {
+            // `d` and its negation `-d` are both private key material. Capture
+            // the byte repr of the negated scalar, then zeroize both scalars so
+            // neither the internal private key nor its negation lingers in the
+            // stack/registers after this scope. (`raw_privkey` bytes are zeroed
+            // below; this closes the matching gap on the Scalar representation —
+            // mirrors `signing::tweaked_signing_key`.)
+            let mut nd = -d;
+            let neg: [u8; 32] = nd.to_repr().into();
+            nd.zeroize();
+            d.zeroize();
+            neg
+        })
     } else {
         Some(raw_privkey)
     };

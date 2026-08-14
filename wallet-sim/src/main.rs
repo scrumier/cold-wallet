@@ -246,13 +246,45 @@ fn wallet_path() -> PathBuf {
     PathBuf::from(home).join(".config").join("cold-wallet").join("wallet.bin")
 }
 
-/// Writes the v2 image atomically (write tmp, then rename).
+/// Writes the image durably and atomically: write tmp → fsync tmp → rename →
+/// fsync dir.
+///
+/// The `fsync`s matter for security, not just durability: the wallet write-ahead
+/// increments the on-disk PIN-failure counter *before* checking the PIN, so that
+/// power-cycling cannot rewind the lockout (no brute-force-by-restart). That
+/// guarantee only holds if the increment has actually reached stable storage —
+/// a buffered write lost to a power-cut would defeat it. We therefore fsync the
+/// file before the rename and fsync the directory after, so both the new
+/// contents and the rename are durable.
 fn persist_blob(blob: &[u8; PERSIST_BYTES]) {
+    use std::io::Write;
+
     let path = wallet_path();
-    if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
+    let Some(dir) = path.parent().map(std::path::Path::to_path_buf) else { return };
+    let _ = std::fs::create_dir_all(&dir);
     let tmp = path.with_extension("bin.tmp");
-    if std::fs::write(&tmp, blob).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+
+    // Write + flush + fsync the temp file.
+    let wrote = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(blob)?;
+        f.flush()?;
+        f.sync_all()?; // fsync file contents to stable storage
+        Ok(())
+    })();
+    if wrote.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+
+    // fsync the directory so the rename itself is durable.
+    if let Ok(d) = std::fs::File::open(&dir) {
+        let _ = d.sync_all();
     }
 }
 

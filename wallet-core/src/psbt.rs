@@ -95,13 +95,23 @@ impl ParsedPsbt {
     }
 
     /// Total amount of all inputs.
+    ///
+    /// Saturating: a malicious PSBT can set each `amount_sats` near `u64::MAX`,
+    /// so a plain `.sum()` would panic in debug builds (and silently wrap in
+    /// release). Saturating to `u64::MAX` instead keeps the device alive and
+    /// surfaces the bogus total as an over-large fee / overflow warning on the
+    /// review screen rather than crashing.
     pub fn total_in(&self) -> u64 {
-        self.inputs[..self.input_count].iter().map(|i| i.amount_sats).sum()
+        self.inputs[..self.input_count]
+            .iter()
+            .fold(0u64, |acc, i| acc.saturating_add(i.amount_sats))
     }
 
-    /// Total amount of all outputs.
+    /// Total amount of all outputs. Saturating for the same reason as `total_in`.
     pub fn total_out(&self) -> u64 {
-        self.outputs[..self.output_count].iter().map(|o| o.amount_sats).sum()
+        self.outputs[..self.output_count]
+            .iter()
+            .fold(0u64, |acc, o| acc.saturating_add(o.amount_sats))
     }
 
     /// Miner fee = total_in - total_out.
@@ -437,5 +447,42 @@ impl<'a> Writer<'a> {
         self.bytes(key)?;
         self.varint(value.len() as u64)?;
         self.bytes(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A malicious PSBT can set every input/output amount near `u64::MAX`.
+    /// `total_in`/`total_out` must saturate instead of panicking (debug) or
+    /// silently wrapping (release), so the device stays alive and the review
+    /// screen surfaces the bogus total rather than crashing.
+    #[test]
+    fn totals_saturate_instead_of_overflowing() {
+        let mut psbt = ParsedPsbt::zero();
+        psbt.input_count  = MAX_INPUTS;
+        psbt.output_count = MAX_OUTPUTS;
+        for i in 0..MAX_INPUTS  { psbt.inputs[i].amount_sats  = u64::MAX; }
+        for i in 0..MAX_OUTPUTS { psbt.outputs[i].amount_sats = u64::MAX; }
+
+        // Would panic in debug with a plain `.sum()`; must saturate here.
+        assert_eq!(psbt.total_in(),  u64::MAX);
+        assert_eq!(psbt.total_out(), u64::MAX);
+        // fee already uses saturating_sub; total_out >= total_in ⇒ fee 0.
+        assert_eq!(psbt.fee(), 0);
+    }
+
+    #[test]
+    fn totals_sum_normally_in_range() {
+        let mut psbt = ParsedPsbt::zero();
+        psbt.input_count  = 2;
+        psbt.output_count = 1;
+        psbt.inputs[0].amount_sats  = 60_000;
+        psbt.inputs[1].amount_sats  = 40_000;
+        psbt.outputs[0].amount_sats = 99_000;
+        assert_eq!(psbt.total_in(),  100_000);
+        assert_eq!(psbt.total_out(), 99_000);
+        assert_eq!(psbt.fee(),       1_000);
     }
 }
