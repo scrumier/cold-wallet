@@ -1,10 +1,53 @@
 //! PSBT v0 (BIP174) parser and encoder for Taproot key-path spends.
 //! All data structures are fixed-size and Copy so they live on the stack.
+//!
+//! All size limits derive from `MAX_PSBT_RAW` (see the `b64_len` helpers and
+//! the compile-time asserts below) so the scan buffer, the parser and the
+//! signed-output buffer can never disagree silently (F-03).
+//!
+//! Known limitation (F-02, partially addressed): the unsigned tx is re-emitted
+//! byte-for-byte as received (`tx_raw` is preserved in `ParsedPsbt`), but
+//! unknown PSBT fields (BIP32 derivations, unknown keys, non-witness UTXOs)
+//! are still dropped on re-encode. BIP174 asks a Signer to preserve them.
+//!
+//! Known limitation (F-06): input amounts come from the host's WITNESS_UTXO
+//! and cannot be verified offline. A lying amount yields an unusable signature
+//! (Taproot commits the amount into the sighash), never fund loss — but the
+//! fee shown on the review screen may be wrong.
 
 pub const MAX_INPUTS:  usize = 5;
 pub const MAX_OUTPUTS: usize = 8;
 pub const MAX_SPK_LEN: usize = 34; // P2TR scriptPubKey is exactly 34 bytes
-pub const MAX_PSBT_RAW: usize = 2048;
+pub const MAX_PSBT_RAW: usize = 4096;
+
+/// Base64 length for `n` raw bytes (const-evaluable).
+pub const fn b64_len(n: usize) -> usize {
+    n.div_ceil(3) * 4
+}
+
+/// Base64 capacity a scan buffer must carry for a max-size PSBT.
+pub const MAX_PSBT_B64: usize = b64_len(MAX_PSBT_RAW);
+
+/// Bytes added to a PSBT per signed input: PSBT_IN_TAP_KEY_SIG is
+/// klen(1) + key(1) + vlen(1) + sig(64).
+pub const TAP_KEY_SIG_KV: usize = 67;
+
+/// Largest possible re-encoded signed PSBT: the input budget plus the
+/// signatures the wallet may add.
+pub const MAX_SIGNED_RAW: usize = MAX_PSBT_RAW + MAX_INPUTS * TAP_KEY_SIG_KV;
+pub const MAX_SIGNED_B64: usize = b64_len(MAX_SIGNED_RAW);
+
+/// Largest unsigned tx we accept inside the global map. A canonical BIP174
+/// unsigned tx has empty scriptSigs, so 5 inputs + 8 outputs fit in ~560
+/// bytes; 768 leaves room for multi-byte varints.
+pub const MAX_TX_RAW: usize = 768;
+
+const _: () = assert!(
+    MAX_TX_RAW >= 4 + 1 + MAX_INPUTS * (32 + 4 + 3 + 4) + 1 + MAX_OUTPUTS * (8 + 3 + MAX_SPK_LEN) + 4,
+    "MAX_TX_RAW must fit the worst-case canonical unsigned tx",
+);
+const _: () = assert!(MAX_SIGNED_RAW >= MAX_PSBT_RAW, "signed budget cannot shrink");
+const _: () = assert!(MAX_PSBT_B64 == b64_len(MAX_PSBT_RAW));
 
 // ── Error ─────────────────────────────────────────────────────────────────────
 
@@ -17,6 +60,11 @@ pub enum PsbtError {
     ScriptTooLong,
     MissingUnsignedTx,
     OutputBufTooSmall,
+    /// The global unsigned tx carries a non-empty scriptSig — BIP174 requires
+    /// them empty; re-emitting such a tx verbatim would sign a non-canonical tx.
+    NonEmptyScriptSig,
+    /// The global unsigned tx exceeds `MAX_TX_RAW`.
+    TxTooLarge,
 }
 
 // ── Data structures ───────────────────────────────────────────────────────────
@@ -81,6 +129,10 @@ pub struct ParsedPsbt {
     pub input_count:  usize,
     pub outputs:      [TxOutput; MAX_OUTPUTS],
     pub output_count: usize,
+    /// The global unsigned tx, byte-for-byte as received (F-02): what gets
+    /// signed is what was scanned, not a re-serialisation of parsed fields.
+    pub tx_raw:       [u8; MAX_TX_RAW],
+    pub tx_len:       usize,
 }
 
 impl ParsedPsbt {
@@ -91,6 +143,8 @@ impl ParsedPsbt {
             input_count:  0,
             outputs: [TxOutput::zero(); MAX_OUTPUTS],
             output_count: 0,
+            tx_raw: [0u8; MAX_TX_RAW],
+            tx_len: 0,
         }
     }
 
@@ -197,19 +251,16 @@ impl ParsedPsbt {
         }
 
         // ── Global map ──────────────────────────────────────────────────────
-        let tx_start;
-        let tx_end;
         loop {
             match r.read_kv()? {
                 None => return Err(PsbtError::MissingUnsignedTx),
                 Some((key, value)) => {
                     if key == [0x00] {
-                        // PSBT_GLOBAL_UNSIGNED_TX — parse it in place
-                        tx_start = r.pos - value.len();
-                        let _ = tx_start; // used below
+                        // PSBT_GLOBAL_UNSIGNED_TX — preserve verbatim (F-02), parse in place.
+                        if value.len() > MAX_TX_RAW { return Err(PsbtError::TxTooLarge); }
+                        psbt.tx_raw[..value.len()].copy_from_slice(value);
+                        psbt.tx_len = value.len();
                         parse_unsigned_tx(value, &mut psbt)?;
-                        tx_end = r.pos;
-                        let _ = tx_end;
                         break;
                     }
                     // ignore other global keys
@@ -240,8 +291,8 @@ impl ParsedPsbt {
                             let st = u32::from_le_bytes(value.try_into().unwrap_or([0u8; 4]));
                             psbt.inputs[i].sighash_type = Some(st);
                         }
-                        // PSBT_IN_TAP_INTERNAL_KEY = 0x12
-                        Some(&0x12) if key.len() == 1 && value.len() == 32 => {
+                        // PSBT_IN_TAP_INTERNAL_KEY = 0x17 (BIP371)
+                        Some(&0x17) if key.len() == 1 && value.len() == 32 => {
                             let mut k = [0u8; 32];
                             k.copy_from_slice(value);
                             psbt.inputs[i].tap_internal_key = Some(k);
@@ -296,7 +347,11 @@ fn parse_unsigned_tx(tx: &[u8], psbt: &mut ParsedPsbt) -> Result<(), PsbtError> 
         psbt.inputs[i].txid.copy_from_slice(txid);
         psbt.inputs[i].vout = r.read_le32().ok_or(PsbtError::Truncated)?;
         let script_len = r.read_varint().ok_or(PsbtError::Truncated)? as usize;
-        if script_len > 0 { r.read_bytes(script_len).ok_or(PsbtError::Truncated)?; }
+        if script_len > 0 {
+            // BIP174: the unsigned tx has empty scriptSigs. Anything else is a
+            // non-canonical tx that must never be signed.
+            return Err(PsbtError::NonEmptyScriptSig);
+        }
         psbt.inputs[i].sequence = r.read_le32().ok_or(PsbtError::Truncated)?;
     }
 
@@ -331,14 +386,17 @@ fn parse_witness_utxo(value: &[u8], input: &mut TxInput) -> Result<(), PsbtError
 // ── Encoder ───────────────────────────────────────────────────────────────────
 
 /// Writes the signed PSBT into `out`. Returns byte count, or `Err` if buffer is too small.
-pub fn encode_signed(psbt: &ParsedPsbt, tx_raw: &[u8], out: &mut [u8]) -> Result<usize, PsbtError> {
+///
+/// The global unsigned tx is re-emitted byte-for-byte as received (F-02) —
+/// the signature commits to exactly the tx that was scanned.
+pub fn encode_signed(psbt: &ParsedPsbt, out: &mut [u8]) -> Result<usize, PsbtError> {
     let mut w = Writer { buf: out, pos: 0 };
 
     // Magic
     w.bytes(b"\x70\x73\x62\x74\xff").ok_or(PsbtError::OutputBufTooSmall)?;
 
-    // Global map: unsigned tx
-    w.psbt_kv(&[0x00], tx_raw).ok_or(PsbtError::OutputBufTooSmall)?;
+    // Global map: the preserved unsigned tx
+    w.psbt_kv(&[0x00], &psbt.tx_raw[..psbt.tx_len]).ok_or(PsbtError::OutputBufTooSmall)?;
     w.byte(0x00).ok_or(PsbtError::OutputBufTooSmall)?; // terminator
 
     // Per-input maps
@@ -353,9 +411,9 @@ pub fn encode_signed(psbt: &ParsedPsbt, tx_raw: &[u8], out: &mut [u8]) -> Result
         let utxo_len = 9 + inp.script_len;
         w.psbt_kv(&[0x01], &utxo[..utxo_len]).ok_or(PsbtError::OutputBufTooSmall)?;
 
-        // PSBT_IN_TAP_INTERNAL_KEY
+        // PSBT_IN_TAP_INTERNAL_KEY (BIP371 type 0x17)
         if let Some(ref ik) = inp.tap_internal_key {
-            w.psbt_kv(&[0x12], ik.as_ref()).ok_or(PsbtError::OutputBufTooSmall)?;
+            w.psbt_kv(&[0x17], ik.as_ref()).ok_or(PsbtError::OutputBufTooSmall)?;
         }
 
         // PSBT_IN_TAP_KEY_SIG (set after signing)
@@ -378,31 +436,6 @@ pub fn encode_signed(psbt: &ParsedPsbt, tx_raw: &[u8], out: &mut [u8]) -> Result
     Ok(w.pos)
 }
 
-/// Serialises the unsigned transaction from a `ParsedPsbt` back to wire format.
-pub fn serialize_unsigned_tx(psbt: &ParsedPsbt, out: &mut [u8]) -> Option<usize> {
-    let mut w = Writer { buf: out, pos: 0 };
-
-    w.le32(psbt.version as u32)?;
-    w.varint(psbt.input_count as u64)?;
-    for i in 0..psbt.input_count {
-        let inp = &psbt.inputs[i];
-        w.bytes(&inp.txid)?;
-        w.le32(inp.vout)?;
-        w.byte(0x00)?;                  // script_sig_len = 0 (unsigned)
-        w.le32(inp.sequence)?;
-    }
-    w.varint(psbt.output_count as u64)?;
-    for i in 0..psbt.output_count {
-        let out_i = &psbt.outputs[i];
-        w.le64(out_i.amount_sats)?;
-        w.varint(out_i.script_len as u64)?;
-        w.bytes(&out_i.script_pubkey[..out_i.script_len])?;
-    }
-    w.le32(psbt.locktime)?;
-
-    Some(w.pos)
-}
-
 // ── Writer helper ─────────────────────────────────────────────────────────────
 
 struct Writer<'a> {
@@ -423,9 +456,6 @@ impl<'a> Writer<'a> {
         self.pos = end;
         Some(())
     }
-
-    fn le32(&mut self, v: u32) -> Option<()> { self.bytes(&v.to_le_bytes()) }
-    fn le64(&mut self, v: u64) -> Option<()> { self.bytes(&v.to_le_bytes()) }
 
     fn varint(&mut self, n: u64) -> Option<()> {
         if n < 0xfd {
@@ -484,5 +514,159 @@ mod tests {
         assert_eq!(psbt.total_in(),  100_000);
         assert_eq!(psbt.total_out(), 99_000);
         assert_eq!(psbt.fee(),       1_000);
+    }
+
+    // ── F-02: the unsigned tx is preserved verbatim ──────────────────────────
+
+    /// Serialises an unsigned tx with non-default version, sequence and
+    /// locktime, so any re-serialisation divergence would show.
+    fn build_exotic_tx(out: &mut [u8; 200]) -> usize {
+        let mut p = 0usize;
+        let mut spk = [0u8; 34];
+        spk[0] = 0x51; spk[1] = 0x20; spk[2..].copy_from_slice(&[0x42u8; 32]);
+
+        out[p..p + 4].copy_from_slice(&3u32.to_le_bytes()); p += 4;          // version 3
+        out[p] = 1; p += 1;                                                  // 1 input
+        out[p..p + 32].copy_from_slice(&[0x11u8; 32]); p += 32;              // txid
+        out[p..p + 4].copy_from_slice(&7u32.to_le_bytes()); p += 4;          // vout 7
+        out[p] = 0; p += 1;                                                  // empty scriptSig
+        out[p..p + 4].copy_from_slice(&0xffff_fffeu32.to_le_bytes()); p += 4;// sequence
+        out[p] = 1; p += 1;                                                  // 1 output
+        out[p..p + 8].copy_from_slice(&12_345u64.to_le_bytes()); p += 8;     // amount
+        out[p] = 34; p += 1;                                                 // spk len
+        out[p..p + 34].copy_from_slice(&spk); p += 34;                       // spk
+        out[p..p + 4].copy_from_slice(&0x1122_3344u32.to_le_bytes()); p += 4;// locktime
+        p
+    }
+
+    /// Wraps a raw tx in a minimal PSBT with one WITNESS_UTXO input map.
+    fn wrap_tx_in_psbt(tx: &[u8], out: &mut [u8; 1024]) -> usize {
+        let mut p = 0usize;
+        let put  = |b: &mut [u8; 1024], pos: &mut usize, v: u8| { b[*pos] = v; *pos += 1; };
+        let puts = |b: &mut [u8; 1024], pos: &mut usize, s: &[u8]| {
+            b[*pos..*pos + s.len()].copy_from_slice(s); *pos += s.len();
+        };
+        puts(out, &mut p, b"psbt\xff");
+        put(out, &mut p, 1);                     // klen 1
+        put(out, &mut p, 0x00);                  // PSBT_GLOBAL_UNSIGNED_TX
+        put(out, &mut p, tx.len() as u8);        // vlen (tx fits, < 253)
+        puts(out, &mut p, tx);
+        put(out, &mut p, 0x00);                  // end global map
+        put(out, &mut p, 1);                     // klen 1
+        put(out, &mut p, 0x01);                  // PSBT_IN_WITNESS_UTXO
+        put(out, &mut p, 8 + 1 + 34);            // vlen
+        puts(out, &mut p, &12_345u64.to_le_bytes());
+        put(out, &mut p, 34);
+        puts(out, &mut p, &{
+            let mut spk = [0u8; 34];
+            spk[0] = 0x51; spk[1] = 0x20; spk[2..].copy_from_slice(&[0x42u8; 32]);
+            spk
+        });
+        put(out, &mut p, 0x00);                  // end input map
+        put(out, &mut p, 0x00);                  // empty output map
+        p
+    }
+
+    #[test]
+    fn signed_encode_preserves_tx_verbatim() {
+        let mut tx = [0u8; 200];
+        let tx_len = build_exotic_tx(&mut tx);
+
+        let mut raw = [0u8; 1024];
+        let raw_len = wrap_tx_in_psbt(&tx[..tx_len], &mut raw);
+
+        let parsed = ParsedPsbt::parse(&raw[..raw_len]).expect("valid PSBT");
+        assert_eq!(parsed.version, 3);
+        assert_eq!(parsed.locktime, 0x1122_3344);
+        assert_eq!(parsed.inputs[0].sequence, 0xffff_fffe);
+
+        let mut signed = [0u8; MAX_SIGNED_RAW];
+        let signed_len = encode_signed(&parsed, &mut signed).expect("encode fits");
+
+        let reparsed = ParsedPsbt::parse(&signed[..signed_len]).expect("signed PSBT reparses");
+        assert_eq!(reparsed.tx_len, tx_len, "tx length preserved");
+        assert_eq!(
+            &reparsed.tx_raw[..reparsed.tx_len],
+            &tx[..tx_len],
+            "signed PSBT must carry the original tx byte-for-byte",
+        );
+    }
+
+    #[test]
+    fn rejects_non_empty_script_sig() {
+        // BIP174: the unsigned tx has empty scriptSigs. A non-empty one is a
+        // non-canonical tx that must never be signed.
+        let mut tx = [0u8; 200];
+        let mut p = 0usize;
+        tx[p..p + 4].copy_from_slice(&2u32.to_le_bytes()); p += 4;   // version
+        tx[p] = 1; p += 1;                                           // 1 input
+        tx[p..p + 32].copy_from_slice(&[0x11u8; 32]); p += 32;       // txid
+        tx[p..p + 4].copy_from_slice(&0u32.to_le_bytes()); p += 4;   // vout
+        tx[p] = 1; p += 1;                                           // scriptSig len 1
+        tx[p] = 0xaa; p += 1;                                        // scriptSig byte
+        tx[p..p + 4].copy_from_slice(&0xffff_ffffu32.to_le_bytes()); p += 4;
+        tx[p] = 1; p += 1;                                           // 1 output
+        tx[p..p + 8].copy_from_slice(&1_000u64.to_le_bytes()); p += 8;
+        tx[p] = 34; p += 1;                                          // spk len
+        tx[p] = 0x51; p += 1; tx[p] = 0x20; p += 1;                  // P2TR prefix
+        tx[p..p + 32].copy_from_slice(&[0x42u8; 32]); p += 32;       // program
+        tx[p..p + 4].copy_from_slice(&0u32.to_le_bytes()); p += 4;   // locktime
+
+        let mut raw = [0u8; 1024];
+        let raw_len = wrap_tx_in_psbt(&tx[..p], &mut raw);
+        assert!(matches!(
+            ParsedPsbt::parse(&raw[..raw_len]),
+            Err(PsbtError::NonEmptyScriptSig)
+        ));
+    }
+
+    #[test]
+    fn parse_reads_tap_internal_key_bip371() {
+        // BIP371 : PSBT_IN_TAP_INTERNAL_KEY est 0x17, pas 0x12. Reproduit le
+        // PSBT réel de bdk/Sparrow : sans ce champ lu, le signer ne reconnaît
+        // aucun input (bug trouvé au jalon testnet).
+        let mut tx = [0u8; 200];
+        let tx_len = build_exotic_tx(&mut tx);
+
+        let mut raw = [0u8; 1024];
+        let mut p = 0usize;
+        let put  = |b: &mut [u8; 1024], pos: &mut usize, v: u8| { b[*pos] = v; *pos += 1; };
+        let puts = |b: &mut [u8; 1024], pos: &mut usize, s: &[u8]| {
+            b[*pos..*pos + s.len()].copy_from_slice(s);
+            *pos += s.len();
+        };
+
+        puts(&mut raw, &mut p, b"psbt\xff");
+        put(&mut raw, &mut p, 1);
+        put(&mut raw, &mut p, 0x00);
+        put(&mut raw, &mut p, tx_len as u8);
+        puts(&mut raw, &mut p, &tx[..tx_len]);
+        put(&mut raw, &mut p, 0x00); // fin global map
+
+        // input 0 : WITNESS_UTXO + TAP_INTERNAL_KEY (0x17)
+        put(&mut raw, &mut p, 1);
+        put(&mut raw, &mut p, 0x01);
+        put(&mut raw, &mut p, 8 + 1 + 34);
+        puts(&mut raw, &mut p, &12_345u64.to_le_bytes());
+        put(&mut raw, &mut p, 34);
+        puts(&mut raw, &mut p, &{
+            let mut spk = [0u8; 34];
+            spk[0] = 0x51; spk[1] = 0x20;
+            spk[2..].copy_from_slice(&[0x42u8; 32]);
+            spk
+        });
+        put(&mut raw, &mut p, 1);
+        put(&mut raw, &mut p, 0x17);
+        put(&mut raw, &mut p, 32);
+        puts(&mut raw, &mut p, &[0x5au8; 32]);
+        put(&mut raw, &mut p, 0x00); // fin input map
+        put(&mut raw, &mut p, 0x00); // output map vide
+
+        let parsed = ParsedPsbt::parse(&raw[..p]).expect("PSBT avec 0x17 doit parser");
+        assert_eq!(
+            parsed.inputs[0].tap_internal_key,
+            Some([0x5au8; 32]),
+            "0x17 doit être lu comme tap_internal_key"
+        );
     }
 }

@@ -1,5 +1,10 @@
-//! Derives the BIP86 tweaked signing key and signs all matching PSBT inputs
-//! with BIP340 Schnorr + BIP341 key-path sighash.
+//! Signs PSBT inputs with BIP340 Schnorr + BIP341 key-path sighash.
+//!
+//! Matching runs over the derivation window (receive/change, index
+//! 0..KEY_WINDOW) so inputs spending any address the wallet can generate are
+//! recognised, not just the first one. Only SIGHASH_DEFAULT (0x00, the Taproot
+//! default) is signed: an explicit SIGHASH_ALL would require a 65-byte
+//! signature with the type byte appended, which this signer does not emit.
 
 use bitcoin_hashes::{sha256, HashEngine};
 use k256::{
@@ -8,7 +13,7 @@ use k256::{
     schnorr::SigningKey,
 };
 use zeroize::Zeroize;
-use crate::derive::{tap_keypair, taproot_tweak_pub};
+use crate::derive::{key_window_slots, own_internal_keys, tap_keypair_at, taproot_tweak_pub};
 use crate::psbt::ParsedPsbt;
 use crate::sighash::taproot_sighash;
 
@@ -16,7 +21,7 @@ use crate::sighash::taproot_sighash;
 pub enum SignError {
     KeyDerivation,
     NoMatchingInput,
-    /// Input specifies a sighash type other than SIGHASH_ALL (0x00 or 0x01).
+    /// Input specifies a sighash type other than SIGHASH_DEFAULT (0x00).
     UnsupportedSighash,
     /// Input has no witness UTXO loaded (script_len == 0); cannot commit to amount/scriptPubKey.
     MissingWitnessUtxo,
@@ -31,54 +36,63 @@ impl core::fmt::Display for SignError {
         match self {
             Self::KeyDerivation      => f.write_str("key derivation failed"),
             Self::NoMatchingInput    => f.write_str("no input matched the wallet key"),
-            Self::UnsupportedSighash => f.write_str("unsupported sighash type (only SIGHASH_ALL accepted)"),
+            Self::UnsupportedSighash => f.write_str("unsupported sighash type (only SIGHASH_DEFAULT accepted)"),
             Self::MissingWitnessUtxo => f.write_str("input is missing witness UTXO data"),
             Self::WitnessProgramMismatch => f.write_str("input UTXO is not our own P2TR output"),
         }
     }
 }
 
-/// Signs all PSBT inputs whose `tap_internal_key` matches the wallet's derived key.
-/// Sets `tap_key_sig` on each matching input.
+/// Signs all PSBT inputs whose `tap_internal_key` matches any key of the
+/// derivation window (branch 0 receive then branch 1 change, index
+/// 0..KEY_WINDOW). Sets `tap_key_sig` on each matching input.
 /// Returns the number of inputs signed, or an error.
 ///
 /// `aux_rand` is passed to BIP340 `sign_prehash_with_aux_rand` for fault-injection
 /// resistance. On the STM32H747 target, supply 32 TRNG bytes. The simulator sources
 /// these from the touch-event entropy (`getrandom`). Pass `&[0u8; 32]` only in tests.
 pub fn sign_psbt(psbt: &mut ParsedPsbt, seed: &[u8; 64], aux_rand: &[u8; 32]) -> Result<usize, SignError> {
-    let (internal_key, mut privkey_bytes) = tap_keypair(seed).ok_or(SignError::KeyDerivation)?;
-    let sk = tweaked_signing_key(&privkey_bytes, &internal_key).ok_or(SignError::KeyDerivation)?;
-    // Zero the raw private key bytes now that the SigningKey is built.
-    for b in privkey_bytes.iter_mut() {
-        unsafe { core::ptr::write_volatile(b, 0); }
-    }
-
-    // The 32-byte witness program that a UTXO we can actually spend must carry.
-    let our_output_key = taproot_tweak_pub(&internal_key).ok_or(SignError::KeyDerivation)?;
+    // Scan the derivation window once: 40 x-only internal keys, in slot order.
+    let window = own_internal_keys(seed).ok_or(SignError::KeyDerivation)?;
+    let slots = key_window_slots();
 
     let mut count = 0usize;
     for i in 0..psbt.input_count {
         let Some(tap_ik) = psbt.inputs[i].tap_internal_key else { continue };
-        if tap_ik != internal_key { continue }
+
+        // Which window key does this input spend?
+        let Some(slot) = window.iter().position(|k| *k == tap_ik) else { continue };
+        let (branch, index) = slots[slot];
 
         // Guard: must have witness UTXO loaded to commit to amount/scriptPubKey.
         if psbt.inputs[i].script_len == 0 {
             return Err(SignError::MissingWitnessUtxo);
         }
 
-        // Guard: the witness UTXO must be our own P2TR output. Taproot already
-        // commits scriptPubKey + amount into the sighash, so a forged UTXO can
-        // only ever yield an unusable signature — but refusing up front keeps us
-        // from emitting signatures for inputs we do not actually own.
+        // Guard: the witness UTXO must be the P2TR output of *this* key. Taproot
+        // already commits scriptPubKey + amount into the sighash, so a forged
+        // UTXO can only ever yield an unusable signature — but refusing up front
+        // keeps us from emitting signatures for inputs we do not actually own.
+        let our_output_key = taproot_tweak_pub(&tap_ik).ok_or(SignError::KeyDerivation)?;
         let spk = &psbt.inputs[i].script_pubkey[..psbt.inputs[i].script_len];
         if spk.len() != 34 || spk[0] != 0x51 || spk[1] != 0x20 || spk[2..] != our_output_key {
             return Err(SignError::WitnessProgramMismatch);
         }
 
-        // Guard: refuse sighash types other than SIGHASH_ALL (0x00 default or 0x01 explicit).
+        // Guard: only SIGHASH_DEFAULT (unspecified or explicit 0x00). An
+        // explicit SIGHASH_ALL would need a 65-byte signature with the hash
+        // type suffix; refusing is safer than emitting a mismatched type.
         match psbt.inputs[i].sighash_type {
-            None | Some(0) | Some(1) => {}
+            None | Some(0) => {}
             Some(_) => return Err(SignError::UnsupportedSighash),
+        }
+
+        // Derive this key's private scalar and build the tweaked signing key.
+        let (_, mut privkey_bytes) = tap_keypair_at(seed, branch, index)
+            .ok_or(SignError::KeyDerivation)?;
+        let sk = tweaked_signing_key(&privkey_bytes, &tap_ik).ok_or(SignError::KeyDerivation)?;
+        for b in privkey_bytes.iter_mut() {
+            unsafe { core::ptr::write_volatile(b, 0); }
         }
 
         let sighash = taproot_sighash(psbt, i);
@@ -136,7 +150,7 @@ fn tweaked_signing_key(privkey: &[u8; 32], internal_key: &[u8; 32]) -> Option<Si
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::derive::taproot_address;
+    use crate::derive::{tap_keypair, taproot_address};
     use crate::psbt::{ParsedPsbt, TxInput, TxOutput};
 
     fn test_seed() -> [u8; 64] {
@@ -260,23 +274,107 @@ mod tests {
     }
 
     #[test]
-    fn accepts_sighash_all_explicit() {
-        // sighash_type = Some(1) is SIGHASH_ALL explicit — must sign successfully.
+    fn rejects_explicit_sighash_all() {
+        // F-01: an explicit SIGHASH_ALL (0x01) needs a 65-byte signature with
+        // the type suffix; this signer emits only SIGHASH_DEFAULT, so the
+        // input is refused rather than signed with a mismatched type.
         let seed = test_seed();
         let mut psbt = make_test_psbt(&seed);
         psbt.inputs[0].sighash_type = Some(1);
         let result = sign_psbt(&mut psbt, &seed, &[0u8; 32]);
-        assert!(result.is_ok(), "expected ok for sighash 1, got {result:?}");
+        assert_eq!(result, Err(SignError::UnsupportedSighash));
+    }
+
+    #[test]
+    fn accepts_sighash_default_explicit() {
+        // sighash_type = Some(0) is SIGHASH_DEFAULT, same as unspecified — must sign.
+        let seed = test_seed();
+        let mut psbt = make_test_psbt(&seed);
+        psbt.inputs[0].sighash_type = Some(0);
+        let result = sign_psbt(&mut psbt, &seed, &[0u8; 32]);
+        assert!(result.is_ok(), "expected ok for sighash 0, got {result:?}");
     }
 
     #[test]
     fn accepts_sighash_none_default() {
-        // sighash_type = None (not specified) defaults to SIGHASH_ALL — must sign.
+        // sighash_type = None (not specified) defaults to SIGHASH_DEFAULT — must sign.
         let seed = test_seed();
         let mut psbt = make_test_psbt(&seed);
         psbt.inputs[0].sighash_type = None;
         let result = sign_psbt(&mut psbt, &seed, &[0u8; 32]);
         assert!(result.is_ok(), "expected ok for sighash None, got {result:?}");
+    }
+
+    #[test]
+    fn signs_input_at_second_receive_index() {
+        // F-04: an input spending the second receive address (0/1) must be
+        // recognised and signed, and the signature must verify against the
+        // output key derived for that index.
+        use crate::derive::{tap_xonly_at, taproot_tweak_pub, RECEIVE_BRANCH};
+        use k256::schnorr::VerifyingKey;
+
+        let seed = test_seed();
+        let ik1 = tap_xonly_at(&seed, RECEIVE_BRANCH, 1).unwrap();
+        let output_key = taproot_tweak_pub(&ik1).unwrap();
+
+        let mut spk = [0u8; 34];
+        spk[0] = 0x51; spk[1] = 0x20;
+        spk[2..].copy_from_slice(&output_key);
+
+        let mut psbt = ParsedPsbt::zero();
+        psbt.version = 2;
+        psbt.locktime = 0;
+        psbt.input_count = 1;
+        psbt.inputs[0] = TxInput {
+            txid: [0xcc; 32], vout: 0, sequence: 0xffff_ffff,
+            amount_sats: 80_000, script_pubkey: spk, script_len: 34,
+            tap_internal_key: Some(ik1), tap_key_sig: None, sighash_type: None,
+        };
+        psbt.output_count = 1;
+        psbt.outputs[0] = TxOutput {
+            amount_sats: 79_000, script_pubkey: spk, script_len: 34, tap_internal_key: None,
+        };
+
+        let sighash = crate::sighash::taproot_sighash(&psbt, 0);
+        let result = sign_psbt(&mut psbt, &seed, &[0u8; 32]);
+        assert_eq!(result, Ok(1), "input at index /0/1 must be signed");
+
+        let sig_bytes = psbt.inputs[0].tap_key_sig.unwrap();
+        let sig = k256::schnorr::Signature::try_from(sig_bytes.as_ref()).unwrap();
+        let vk = VerifyingKey::from_bytes(&output_key).unwrap();
+        vk.verify_raw(&sighash, &sig)
+            .expect("signature for /0/1 must verify against its output key");
+    }
+
+    #[test]
+    fn rejects_input_outside_derivation_window() {
+        // F-04: an input whose key is in the account but beyond the scan
+        // window (index 25) is not signed.
+        use crate::derive::{tap_xonly_at, RECEIVE_BRANCH};
+
+        let seed = test_seed();
+        let ik25 = tap_xonly_at(&seed, RECEIVE_BRANCH, 25).unwrap();
+        let output_key = crate::derive::taproot_tweak_pub(&ik25).unwrap();
+
+        let mut spk = [0u8; 34];
+        spk[0] = 0x51; spk[1] = 0x20;
+        spk[2..].copy_from_slice(&output_key);
+
+        let mut psbt = ParsedPsbt::zero();
+        psbt.version = 2;
+        psbt.input_count = 1;
+        psbt.inputs[0] = TxInput {
+            txid: [0xdd; 32], vout: 0, sequence: 0xffff_ffff,
+            amount_sats: 80_000, script_pubkey: spk, script_len: 34,
+            tap_internal_key: Some(ik25), tap_key_sig: None, sighash_type: None,
+        };
+        psbt.output_count = 1;
+        psbt.outputs[0] = TxOutput {
+            amount_sats: 79_000, script_pubkey: spk, script_len: 34, tap_internal_key: None,
+        };
+
+        let result = sign_psbt(&mut psbt, &seed, &[0u8; 32]);
+        assert_eq!(result, Err(SignError::NoMatchingInput), "index beyond window must not be signed");
     }
 
     #[test]

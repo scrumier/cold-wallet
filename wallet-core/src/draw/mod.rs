@@ -1,5 +1,6 @@
 mod about;
 mod accounts;
+mod descriptor;
 mod home;
 mod mnemonic;
 mod passphrase;
@@ -30,7 +31,9 @@ pub fn draw_ui<D>(
     address: Option<&str>,
     psbt: Option<&ParsedPsbt>,
     signed_b64: Option<&str>,
-    our_output_key: Option<[u8; 32]>,
+    descriptor: Option<&str>,
+    own_output_keys: Option<&[[u8; 32]]>,
+    sd_files: &[&str],
     scan_error: bool,
 ) -> Result<(), D::Error>
 where
@@ -55,10 +58,11 @@ where
         AppState::Receive                          => receive::draw(display, address)?,
         AppState::Accounts                         => accounts::draw(display)?,
         AppState::Settings                         => settings::draw(display)?,
+        AppState::Descriptor                       => descriptor::draw(display, descriptor)?,
         AppState::ShowMnemonic { page }            => mnemonic::draw(display, page, words)?,
         AppState::About                            => about::draw(display)?,
-        AppState::SignScan                         => sign_scan::draw(display, scan_error)?,
-        AppState::SignReview                       => sign_review::draw(display, psbt, our_output_key)?,
+        AppState::SignScan                         => sign_scan::draw(display, sd_files, scan_error)?,
+        AppState::SignReview                       => sign_review::draw(display, psbt, own_output_keys)?,
         AppState::SignResult                       => sign_result::draw(display, signed_b64)?,
     }
 
@@ -128,4 +132,99 @@ mod tests {
         assert_eq!(fmt_u8(42, &mut buf), "42");
         assert_eq!(fmt_u8(255, &mut buf), "255");
     }
+}
+
+// ── QR rendering (generation only — the qrcode crate needs std) ──────────────
+// On the bare-metal target these fall back to a placeholder until phase 4
+// of the roadmap (a no_std encoder).
+
+#[cfg(feature = "std")]
+pub(crate) fn draw_qr_data<D>(
+    display: &mut D,
+    data: &[u8],
+    x: i32,
+    y: i32,
+    size: i32,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    use qrcode::types::Color as QrColor;
+    use qrcode::{EcLevel, QrCode};
+
+    let qr = match QrCode::with_error_correction_level(data, EcLevel::L) {
+        Ok(q) => q,
+        Err(_) => return draw_qr_placeholder(display, x, y, size),
+    };
+
+    let modules = qr.width();
+
+    // Scale to fit `size` px with a 4-module quiet zone on each side.
+    let total_modules = modules + 8;
+    let module_px = ((size as usize) / total_modules).max(1);
+    let px_used = total_modules * module_px;
+    let border = ((size as usize).saturating_sub(px_used) / 2) as i32;
+    let quiet_px = (4 * module_px) as i32;
+    let origin_x = x + border + quiet_px;
+    let origin_y = y + border + quiet_px;
+
+    let fill_white = PrimitiveStyleBuilder::new().fill_color(Rgb565::WHITE).build();
+    let fill_black = PrimitiveStyleBuilder::new().fill_color(Rgb565::BLACK).build();
+
+    Rectangle::new(Point::new(x, y), Size::new(size as u32, size as u32))
+        .into_styled(fill_white)
+        .draw(display)?;
+
+    // Dark modules — qr[(col, row)] per the qrcode crate's Index impl.
+    let mpx = module_px as u32;
+    for row in 0..modules {
+        for col in 0..modules {
+            if qr[(col, row)] == QrColor::Dark {
+                Rectangle::new(
+                    Point::new(
+                        origin_x + (col * module_px) as i32,
+                        origin_y + (row * module_px) as i32,
+                    ),
+                    Size::new(mpx, mpx),
+                )
+                .into_styled(fill_black)
+                .draw(display)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "std"))]
+pub(crate) fn draw_qr_data<D>(
+    display: &mut D,
+    _data: &[u8],
+    x: i32,
+    y: i32,
+    size: i32,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    draw_qr_placeholder(display, x, y, size)
+}
+
+pub(crate) fn draw_qr_placeholder<D>(
+    display: &mut D,
+    x: i32,
+    y: i32,
+    size: i32,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    Rectangle::new(Point::new(x, y), Size::new(size as u32, size as u32))
+        .into_styled(white_stroke(2))
+        .draw(display)?;
+
+    Text::with_alignment("QR", Point::new(x + size / 2, y + size / 2 + 7), white_text(), Center)
+        .draw(display)?;
+
+    Ok(())
 }

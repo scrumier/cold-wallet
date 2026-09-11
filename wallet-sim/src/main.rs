@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use embedded_graphics::geometry::Size;
 use embedded_graphics::pixelcolor::Rgb565;
@@ -8,14 +8,10 @@ use embedded_graphics_simulator::{
 };
 use wallet_core::{
     draw_ui, AppState, ColdWallet, PERSIST_BYTES, Secrets, WalletEvent,
-    derive_key, encrypt_into_blob, NONCE_LEN, SALT_LEN,
+    derive_key, encrypt_into_blob, layout::{SD_FILES_MAX, SD_FILE_H, SD_FILE_STEP, SD_FILE_W,
+                                            SD_FILE_X, sd_file_y},
+    MAX_PSBT_B64, NONCE_LEN, SALT_LEN,
 };
-
-// Viewfinder hit area — matches layout::SIGN_VF_* constants.
-const VF_X: i32 = 200; // (800 - 400) / 2
-const VF_Y: i32 = 70;
-const VF_W: i32 = 400;
-const VF_H: i32 = 300;
 
 const SCREEN_WIDTH: u32  = 800;
 const SCREEN_HEIGHT: u32 = 480;
@@ -79,6 +75,7 @@ fn state_name(state: AppState) -> &'static str {
         SignResult             => "SignResult",
         Accounts               => "Accounts",
         Settings               => "Settings",
+        Descriptor             => "Descriptor",
         ShowMnemonic { page }  => match page {
             0 => "ShowMnemonic(1/4)", 1 => "ShowMnemonic(2/4)",
             2 => "ShowMnemonic(3/4)", _ => "ShowMnemonic(4/4)",
@@ -91,154 +88,64 @@ fn state_name(state: AppState) -> &'static str {
     }
 }
 
-/// Builds a minimal single-input P2TR test PSBT for the given x-only internal key,
-/// returns it Base64-encoded. The "transaction" sends 100k sats to the same address.
-fn make_test_psbt_b64(internal_key: [u8; 32]) -> ([u8; 512], usize) {
-    // Compute tweaked output key (P2TR scriptPubKey witness program).
-    // We replicate the taproot tweak here using raw bytes.
-    use bitcoin_hashes::{sha256, HashEngine};
+// ── Simulated microSD ────────────────────────────────────────────────────────
+//
+// The exchange channel (roadmap v1 decision): a local folder plays the role
+// of the card. The core only ever sees bytes and file *names* — it stays
+// filesystem-blind. Convention: read `*.psbt`, write `<stem>-signed.psbt`.
 
-    let tag = sha256::Hash::hash(b"TapTweak");
-    let mut eng = sha256::Hash::engine();
-    eng.input(tag.as_ref());
-    eng.input(tag.as_ref());
-    eng.input(&internal_key);
-    let tweak_hash = sha256::Hash::from_engine(eng);
-    let tweak_bytes: [u8; 32] = {
-        let mut b = [0u8; 32];
-        b.copy_from_slice(tweak_hash.as_ref());
-        b
-    };
-
-    use k256::{ProjectivePoint, AffinePoint, Scalar};
-    use k256::elliptic_curve::{PrimeField, sec1::{EncodedPoint, FromEncodedPoint, ToEncodedPoint}};
-
-    let mut compressed = [0u8; 33];
-    compressed[0] = 0x02;
-    compressed[1..].copy_from_slice(&internal_key);
-    let enc = EncodedPoint::<k256::Secp256k1>::from_bytes(compressed).unwrap();
-    let p = AffinePoint::from_encoded_point(&enc).unwrap();
-    let t: Scalar = Scalar::from_repr(tweak_bytes.into()).unwrap();
-    let q = ProjectivePoint::from(p) + ProjectivePoint::GENERATOR * t;
-    let q_enc = AffinePoint::from(q).to_encoded_point(true);
-    let mut output_key = [0u8; 32];
-    output_key.copy_from_slice(&q_enc.as_bytes()[1..]);
-
-    let mut spk = [0u8; 34];
-    spk[0] = 0x51; // OP_1
-    spk[1] = 0x20; // OP_PUSHBYTES_32
-    spk[2..].copy_from_slice(&output_key);
-
-    // Serialise a minimal PSBT v0 by hand.
-    // Global map: magic + separator + PSBT_GLOBAL_UNSIGNED_TX (key=0x00)
-    // One input: PSBT_IN_WITNESS_UTXO (0x01) + PSBT_IN_TAP_INTERNAL_KEY (0x12)
-    // One output: empty map
-    let mut buf = [0u8; 1024];
-    let mut pos = 0usize;
-
-    let w = |buf: &mut [u8; 1024], p: &mut usize, b: u8| { buf[*p] = b; *p += 1; };
-    let wslice = |buf: &mut [u8; 1024], p: &mut usize, s: &[u8]| {
-        buf[*p..*p + s.len()].copy_from_slice(s); *p += s.len();
-    };
-    let varint = |buf: &mut [u8; 1024], p: &mut usize, n: usize| {
-        if n < 0xfd { w(buf, p, n as u8); }
-        else { w(buf, p, 0xfd); w(buf, p, (n & 0xff) as u8); w(buf, p, ((n >> 8) & 0xff) as u8); }
-    };
-
-    // PSBT magic
-    wslice(&mut buf, &mut pos, b"psbt\xff");
-
-    // Global unsigned tx (key=0x00)
-    // Build the raw unsigned tx first.
-    let mut tx = [0u8; 200];
-    let mut tp = 0usize;
-    let tw = |tb: &mut [u8; 200], tp: &mut usize, b: u8| { tb[*tp] = b; *tp += 1; };
-    let twslice = |tb: &mut [u8; 200], tp: &mut usize, s: &[u8]| {
-        tb[*tp..*tp + s.len()].copy_from_slice(s); *tp += s.len();
-    };
-    // version (le u32 = 2)
-    twslice(&mut tx, &mut tp, &[2u8, 0, 0, 0]);
-    // input count varint = 1
-    tw(&mut tx, &mut tp, 1);
-    // input: txid (32 bytes, all 0xab), vout (le u32 = 0), script_len = 0, sequence
-    twslice(&mut tx, &mut tp, &[0xabu8; 32]);
-    twslice(&mut tx, &mut tp, &[0u8; 4]); // vout = 0
-    tw(&mut tx, &mut tp, 0);              // scriptSig len = 0
-    twslice(&mut tx, &mut tp, &[0xff, 0xff, 0xff, 0xff]); // sequence
-    // output count = 1
-    tw(&mut tx, &mut tp, 1);
-    // output: amount (le u64 = 99_000 sats), scriptPubKey
-    twslice(&mut tx, &mut tp, &99_000u64.to_le_bytes());
-    tw(&mut tx, &mut tp, 34); // scriptPubKey len
-    twslice(&mut tx, &mut tp, &spk);
-    // locktime (le u32 = 0)
-    twslice(&mut tx, &mut tp, &[0u8; 4]);
-
-    let tx_len = tp;
-    varint(&mut buf, &mut pos, 1);  // key len = 1
-    w(&mut buf, &mut pos, 0x00);    // key = PSBT_GLOBAL_UNSIGNED_TX
-    varint(&mut buf, &mut pos, tx_len);
-    wslice(&mut buf, &mut pos, &tx[..tx_len]);
-    // separator (end of global map)
-    w(&mut buf, &mut pos, 0x00);
-
-    // Input 0 map: PSBT_IN_WITNESS_UTXO (key=0x01)
-    varint(&mut buf, &mut pos, 1);  // key len = 1
-    w(&mut buf, &mut pos, 0x01);    // key
-    // value = witness utxo: amount (8 bytes le) + scriptPubKey (varint + bytes)
-    let utxo_val_len = 8 + 1 + 34;
-    varint(&mut buf, &mut pos, utxo_val_len);
-    wslice(&mut buf, &mut pos, &100_000u64.to_le_bytes()); // 100k sats
-    w(&mut buf, &mut pos, 34);      // scriptPubKey len
-    wslice(&mut buf, &mut pos, &spk);
-
-    // PSBT_IN_TAP_INTERNAL_KEY (key=0x12)
-    varint(&mut buf, &mut pos, 1);  // key len = 1
-    w(&mut buf, &mut pos, 0x12);    // key
-    varint(&mut buf, &mut pos, 32); // value len = 32
-    wslice(&mut buf, &mut pos, &internal_key);
-    // end of input 0
-    w(&mut buf, &mut pos, 0x00);
-
-    // Output 0 map: empty
-    w(&mut buf, &mut pos, 0x00);
-
-    let psbt_len = pos;
-
-    // Base64-encode.
-    let b64_cap = psbt_len.div_ceil(3) * 4;
-    let mut b64 = [0u8; 512];
-    let b64_len = base64_encode(&buf[..psbt_len], &mut b64[..b64_cap.min(512)]);
-    (b64, b64_len)
+fn sd_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".config").join("cold-wallet").join("sd")
 }
 
-/// Minimal base64 encoder (duplicates wallet_core's private impl so we don't expose it).
-fn base64_encode(input: &[u8], out: &mut [u8]) -> usize {
-    const ENC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut i = 0;
-    let mut o = 0;
-    while i + 2 < input.len() {
-        let (a, b, c) = (input[i] as usize, input[i+1] as usize, input[i+2] as usize);
-        out[o]     = ENC[a >> 2];
-        out[o + 1] = ENC[((a << 4) | (b >> 4)) & 0x3f];
-        out[o + 2] = ENC[((b << 2) | (c >> 6)) & 0x3f];
-        out[o + 3] = ENC[c & 0x3f];
-        i += 3; o += 4;
+/// Lists loadable PSBT files: `*.psbt`, excluding already-signed outputs,
+/// sorted by name, capped at `SD_FILES_MAX`.
+fn list_psbt_files(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".psbt") && !name.ends_with("-signed.psbt") {
+                names.push(name);
+            }
+        }
     }
-    match input.len() - i {
-        1 => { let a = input[i] as usize;
-               out[o] = ENC[a >> 2]; out[o+1] = ENC[(a << 4) & 0x3f];
-               out[o+2] = b'='; out[o+3] = b'='; o += 4; }
-        2 => { let (a, b) = (input[i] as usize, input[i+1] as usize);
-               out[o] = ENC[a >> 2]; out[o+1] = ENC[((a << 4) | (b >> 4)) & 0x3f];
-               out[o+2] = ENC[(b << 2) & 0x3f]; out[o+3] = b'='; o += 4; }
-        _ => {}
+    names.sort();
+    names.truncate(SD_FILES_MAX);
+    names
+}
+
+/// "foo.psbt" → "foo-signed.psbt".
+fn signed_name(name: &str) -> String {
+    let stem = name.strip_suffix(".psbt").unwrap_or(name);
+    format!("{stem}-signed.psbt")
+}
+
+/// Reads one PSBT file (Base64 text, as Sparrow exports) into the scan buffer.
+fn read_psbt_file(path: &Path) -> Option<([u8; MAX_PSBT_B64], usize)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    if text.is_empty() || text.len() > MAX_PSBT_B64 {
+        eprintln!("[WALLET] Ignoring PSBT file (empty or too large): {}", path.display());
+        return None;
     }
-    o
+    let mut data = [0u8; MAX_PSBT_B64];
+    data[..text.len()].copy_from_slice(text.as_bytes());
+    Some((data, text.len()))
 }
 
 fn in_rect(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
     x >= rx && x < rx + rw && y >= ry && y < ry + rh
+}
+
+fn sd_row_at(x: i32, y: i32) -> Option<usize> {
+    if !in_rect(x, y, SD_FILE_X, sd_file_y(0), SD_FILE_W, SD_FILE_STEP * SD_FILES_MAX as i32) {
+        return None;
+    }
+    let row = ((y - sd_file_y(0)) / SD_FILE_STEP) as usize;
+    let within_row = in_rect(x, y, SD_FILE_X, sd_file_y(row), SD_FILE_W, SD_FILE_H);
+    (row < SD_FILES_MAX && within_row).then_some(row)
 }
 
 fn wallet_path() -> PathBuf {
@@ -336,6 +243,11 @@ fn migrate_v1_to_v3(v1: &[u8; 103]) -> Option<[u8; PERSIST_BYTES]> {
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let sd = sd_dir();
+    let _ = std::fs::create_dir_all(&sd);
+    println!("[WALLET] SD folder: {}", sd.display());
+    println!("[WALLET] Put Sparrow-exported *.psbt files there; signed output lands next to them.");
+
     let mut display = SimulatorDisplay::<Rgb565>::new(Size::new(SCREEN_WIDTH, SCREEN_HEIGHT));
     let mut wallet = match load_wallet_image() {
         Some(image) => match ColdWallet::from_disk_image(image, entropy()) {
@@ -352,9 +264,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let output_settings = OutputSettingsBuilder::new().scale(1).build();
-    let mut window = Window::new("Cold Wallet — Simulator", &output_settings);
+    let mut window = Window::new("Cold Wallet — Simulator (testnet)", &output_settings);
 
-    draw_ui(&mut display, &wallet)?;
+    draw_ui(&mut display, &wallet, &[])?;
+
+    // Side-effects owned by the sim (the core stays filesystem-blind):
+    let mut loaded_file: Option<String> = None;   // PSBT currently under review
+    let mut signed_written = false;               // signed output written for this load
+    let mut descriptor_written = false;           // descriptor.txt exported this session
+    let mut sd_list: Vec<String> = Vec::new();    // current SignScan file listing
 
     'running: loop {
         window.update(&display);
@@ -376,16 +294,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         persist_blob(blob);
                     };
 
-                    // In SignScan, a tap in the viewfinder simulates a QR scan.
-                    if matches!(before, AppState::SignScan)
-                        && in_rect(point.x, point.y, VF_X, VF_Y, VF_W, VF_H)
-                    {
-                        if let Some(ik) = wallet.tap_internal_key() {
-                            println!("[WALLET] SignScan: injecting test PSBT…");
-                            let (data, len) = make_test_psbt_b64(ik);
-                            wallet.handle_event(WalletEvent::PsbtScanned { data, len }, &mut persist);
+                    // In SignScan, a tap on a file row loads that PSBT file.
+                    if matches!(before, AppState::SignScan) {
+                        if let Some(row) = sd_row_at(point.x, point.y) {
+                            if let Some(name) = sd_list.get(row) {
+                                println!("[WALLET] Loading {name}…");
+                                if let Some((data, len)) = read_psbt_file(&sd.join(name)) {
+                                    loaded_file = Some(name.clone());
+                                    signed_written = false;
+                                    wallet.handle_event(WalletEvent::PsbtScanned { data, len }, &mut persist);
+                                }
+                            }
                         } else {
-                            println!("[WALLET] SignScan: no key derived yet — complete wallet setup first");
+                            wallet.handle_event(
+                                WalletEvent::Touch { x: point.x, y: point.y, entropy: entropy() },
+                                &mut persist,
+                            );
                         }
                     } else {
                         wallet.handle_event(
@@ -395,9 +319,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     let after = wallet.get_state();
+
+                    // Entering SignScan: refresh the file listing shown on screen.
+                    if matches!(after, AppState::SignScan) && !matches!(before, AppState::SignScan) {
+                        sd_list = list_psbt_files(&sd);
+                        if sd_list.is_empty() {
+                            println!("[WALLET] No *.psbt file in {} — export one from Sparrow", sd.display());
+                        }
+                        loaded_file = None;
+                        signed_written = false;
+                    }
+
                     if before != after {
                         log_transition(before, after);
-                        draw_ui(&mut display, &wallet)?;
+                    }
+
+                    // Reaching Home: export the descriptor once per session so the
+                    // hot side can import the wallet.
+                    if matches!(after, AppState::Home)
+                        && !descriptor_written
+                        && let Some(desc) = wallet.descriptor()
+                    {
+                        let path = sd.join("descriptor.txt");
+                        match std::fs::write(&path, desc) {
+                            Ok(()) => {
+                                descriptor_written = true;
+                                println!("[WALLET] Descriptor exported to {}", path.display());
+                            }
+                            Err(e) => eprintln!("[WALLET] Descriptor write failed: {e}"),
+                        }
+                    }
+
+                    // Signature completed for the loaded file: write the signed PSBT
+                    // next to it, in the same Base64 form Sparrow imports.
+                    if matches!(after, AppState::SignResult)
+                        && !signed_written
+                        && let Some(name) = &loaded_file
+                        && let Some(signed) = wallet.signed_psbt_b64()
+                    {
+                        let path = sd.join(signed_name(name));
+                        match std::fs::write(&path, signed) {
+                            Ok(()) => {
+                                signed_written = true;
+                                println!("[WALLET] Signed PSBT written to {}", path.display());
+                            }
+                            Err(e) => eprintln!("[WALLET] Signed write failed: {e}"),
+                        }
+                    }
+
+                    if before != after {
+                        draw_ui(&mut display, &wallet, &sd_list.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
                     }
 
                     // Two-phase resolution: if the input parked us in a
@@ -418,8 +389,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 println!("[WALLET] Wallet saved (encrypted) to {}", wallet_path().display());
                             }
-                            draw_ui(&mut display, &wallet)?;
+                            draw_ui(&mut display, &wallet, &sd_list.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
                         }
+                    }
+
+                    // Redraw when entering SignScan (file listing appeared).
+                    if matches!(after, AppState::SignScan) && !matches!(before, AppState::SignScan) {
+                        draw_ui(&mut display, &wallet, &sd_list.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
                     }
                 }
                 _ => {}
@@ -430,4 +406,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lists_psbt_files_sorted_and_filters_signed() {
+        let dir = std::env::temp_dir().join(format!("cw-sd-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("b.psbt"), "AAAA").unwrap();
+        std::fs::write(dir.join("a.psbt"), "BBBB").unwrap();
+        std::fs::write(dir.join("a-signed.psbt"), "CCCC").unwrap();
+        std::fs::write(dir.join("note.txt"), "").unwrap();
+
+        let files = list_psbt_files(&dir);
+        assert_eq!(files, vec!["a.psbt".to_string(), "b.psbt".to_string()]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn signed_name_appends_suffix() {
+        assert_eq!(signed_name("foo.psbt"), "foo-signed.psbt");
+        assert_eq!(signed_name("noext"), "noext-signed.psbt");
+    }
+
+    #[test]
+    fn sd_row_hit_test_matches_layout() {
+        // Row 0 and row 1 are hittable, outside rows are not.
+        assert_eq!(sd_row_at(SD_FILE_X + 5, sd_file_y(0) + 30), Some(0));
+        assert_eq!(sd_row_at(SD_FILE_X + 5, sd_file_y(0) + SD_FILE_STEP + 30), Some(1));
+        assert_eq!(sd_row_at(SD_FILE_X + 5, sd_file_y(0) + 4 * SD_FILE_STEP + 30), None, "beyond max rows");
+        assert_eq!(sd_row_at(SD_FILE_X - 1, sd_file_y(0) + 30), None, "outside horizontally");
+    }
 }

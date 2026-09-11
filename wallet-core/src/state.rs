@@ -2,10 +2,13 @@ use bip39::Mnemonic;
 
 use crate::base64;
 use crate::crypto::{self, KEY_LEN, NONCE_LEN, SALT_LEN};
-use crate::derive::{indices_to_entropy, taproot_address};
+use crate::derive::{
+    indices_to_entropy, own_output_keys, taproot_address, taproot_descriptor, DESCRIPTOR_MAX,
+    OWN_KEY_COUNT,
+};
 use crate::keyboard::{passphrase_key_at, KeyPress};
 use crate::layout::*;
-use crate::psbt::{self, ParsedPsbt, MAX_PSBT_RAW};
+use crate::psbt::{self, ParsedPsbt, MAX_PSBT_B64, MAX_PSBT_RAW, MAX_SIGNED_B64, MAX_SIGNED_RAW};
 use crate::signing::sign_psbt;
 use crate::storage::{
     DiskHeader, PERSIST_BYTES, Secrets, encrypt_into_blob, try_decrypt, update_lockout,
@@ -54,21 +57,21 @@ pub enum AppState {
     SignResult,
     Accounts,
     Settings,
+    Descriptor,
     ShowMnemonic     { page: u8 },
     About,
 }
 
-// PsbtScanned carries 512 bytes; boxing would require alloc which we don't have in no_std.
+// PsbtScanned carries a full max-size Base64 image; boxing would require
+// alloc which we don't have in no_std. The capacity derives from the parser
+// limits (see psbt.rs) so the three can never disagree (F-03).
 #[allow(clippy::large_enum_variant)]
 pub enum WalletEvent {
     Touch { x: i32, y: i32, entropy: [u8; 32] },
-    /// A PSBT QR code was successfully decoded by the camera / simulator.
+    /// A PSBT was successfully decoded by the camera / file reader.
     /// `data` is the raw Base64-encoded PSBT; `len` is the number of valid bytes.
-    PsbtScanned { data: [u8; 512], len: usize },
+    PsbtScanned { data: [u8; MAX_PSBT_B64], len: usize },
 }
-
-/// Max byte length of a Base64-encoded signed PSBT we'll display as a QR.
-const MAX_SIGNED_B64: usize = 1024;
 
 pub struct ColdWallet {
     pub state:          AppState,
@@ -83,6 +86,15 @@ pub struct ColdWallet {
     /// Base64 of the signed PSBT, for QR display on SignResult screen.
     signed_psbt_b64:    [u8; MAX_SIGNED_B64],
     signed_psbt_b64_len: usize,
+    /// Tweaked output keys of the derivation window (F-04): receive 0/0..20
+    /// then change 1/0..20. Derived whenever the seed becomes available;
+    /// `None` before setup/unlock. Used to classify change at review time.
+    own_keys:           Option<[[u8; 32]; OWN_KEY_COUNT]>,
+    /// BIP386 output descriptor of this wallet (`tr([...]/<0;1>/*)#checksum`),
+    /// built whenever the seed becomes available. Public information, but
+    /// identifying — zeroized like the rest on drop.
+    descriptor:         [u8; DESCRIPTOR_MAX],
+    descriptor_len:     usize,
 
     // ── At-rest encryption + lockout state ────────────────────────────────
     /// Per-wallet salt. Generated on initial PIN confirmation, persisted in the
@@ -118,6 +130,9 @@ impl ColdWallet {
             psbt:               None,
             signed_psbt_b64:    [0u8; MAX_SIGNED_B64],
             signed_psbt_b64_len: 0,
+            own_keys:           None,
+            descriptor:         [0u8; DESCRIPTOR_MAX],
+            descriptor_len:     0,
             salt:               [0u8; SALT_LEN],
             enc_key:            None,
             failures:           0,
@@ -133,7 +148,7 @@ impl ColdWallet {
 
     /// Returns the derived P2TR address, or `None` if not yet derived.
     pub fn receive_address(&self) -> Option<&str> {
-        if self.address[0] == b'b' {
+        if self.address[0] == b'b' || self.address[0] == b't' {
             core::str::from_utf8(&self.address).ok()
         } else {
             None
@@ -147,13 +162,23 @@ impl ColdWallet {
         crate::derive::tap_keypair(&self.seed).map(|(ik, _)| ik)
     }
 
-    /// Returns the x-only *tweaked* output key — i.e. the 32-byte witness
-    /// program that appears in our own P2TR scriptPubKeys. Used by the sign-
-    /// review screen to identify change outputs without trusting PSBT
-    /// metadata.
-    pub fn tap_output_key(&self) -> Option<[u8; 32]> {
-        let ik = self.tap_internal_key()?;
-        crate::derive::taproot_tweak_pub(&ik)
+    /// Returns the x-only *tweaked* output keys of the whole derivation
+    /// window (receive 0/0..20, change 1/0..20) — the 32-byte witness
+    /// programs that can appear in our own P2TR scriptPubKeys. Used by the
+    /// sign-review screen to identify change without trusting PSBT metadata.
+    pub fn own_output_keys(&self) -> Option<&[[u8; 32]; OWN_KEY_COUNT]> {
+        self.own_keys.as_ref()
+    }
+
+    /// Returns the BIP386 output descriptor of this wallet, if built. This is
+    /// what a watch-only wallet (Sparrow, …) imports to construct PSBTs for
+    /// us — without it, no host can start the signing loop.
+    pub fn descriptor(&self) -> Option<&str> {
+        if self.descriptor_len > 0 {
+            core::str::from_utf8(&self.descriptor[..self.descriptor_len]).ok()
+        } else {
+            None
+        }
     }
 
     /// Returns the currently loaded PSBT, if any.
@@ -404,7 +429,7 @@ impl ColdWallet {
                 Ok(secrets) => {
                     self.entropy = secrets.entropy;
                     self.seed    = secrets.seed;
-                    self.address = taproot_address(&self.seed).unwrap_or([0u8; 62]);
+                    self.rebuild_derivations();
                     self.words   = generate_words(&self.entropy);
                     self.pin     = Some(digits);
                     self.enc_key = Some(key);
@@ -475,13 +500,22 @@ impl ColdWallet {
         if let Ok(m) = Mnemonic::from_entropy(&self.entropy) {
             let mut seed = m.to_seed_normalized(passphrase);
             debug_assert!(taproot_address(&seed).is_some(), "taproot derivation failed");
-            if let Some(addr) = taproot_address(&seed) {
-                self.address = addr;
-                self.seed    = seed; // seed is Copy — self.seed now holds it
+            if taproot_address(&seed).is_some() {
+                self.seed = seed; // seed is Copy — self.seed now holds it
+                self.rebuild_derivations();
             }
             // Zero the local copy regardless of derivation success.
             for b in seed.iter_mut() { unsafe { core::ptr::write_volatile(b, 0); } }
         }
+    }
+
+    /// Rebuilds everything derived from the seed: receive address, the
+    /// derivation-window output keys (F-04) and the BIP386 descriptor.
+    /// Called whenever the seed becomes available (setup, restore, unlock).
+    fn rebuild_derivations(&mut self) {
+        self.address = taproot_address(&self.seed).unwrap_or([0u8; 62]);
+        self.own_keys = own_output_keys(&self.seed);
+        self.descriptor_len = taproot_descriptor(&self.seed, &mut self.descriptor).unwrap_or(0);
     }
 
     /// Decodes a Base64 PSBT, parses it, and transitions to SignReview on success.
@@ -510,17 +544,14 @@ impl ColdWallet {
         let Some(ref mut psbt) = self.psbt else { return };
         if sign_psbt(psbt, &self.seed, aux_rand).is_err() { return }
 
-        // Serialise the unsigned tx (needed as the global map entry in the signed PSBT).
-        let mut tx_buf  = [0u8; MAX_PSBT_RAW];
-        let Some(tx_len) = psbt::serialize_unsigned_tx(psbt, &mut tx_buf) else { return };
+        // Re-emit the PSBT with the signatures added. The unsigned tx inside is
+        // the one preserved verbatim at parse time (F-02), not a re-serialisation.
+        let mut psbt_bin = [0u8; MAX_SIGNED_RAW];
+        let Ok(psbt_len) = psbt::encode_signed(psbt, &mut psbt_bin) else { return };
 
-        // Build the signed PSBT binary.
-        let mut psbt_bin = [0u8; MAX_PSBT_RAW];
-        let Ok(psbt_len) = psbt::encode_signed(psbt, &tx_buf[..tx_len], &mut psbt_bin) else { return };
-
-        // Base64-encode for QR display.
+        // Base64-encode for QR display. The buffer capacity derives from
+        // MAX_SIGNED_RAW (psbt.rs), so this only fires on an invariant break.
         if psbt_len.div_ceil(3) * 4 > self.signed_psbt_b64.len() {
-            // Signed PSBT would overflow our base64 buffer — drop it rather than panic.
             return;
         }
         let b64_len = base64::encode(&psbt_bin[..psbt_len], &mut self.signed_psbt_b64);
@@ -538,9 +569,15 @@ impl Drop for ColdWallet {
         if let Some(ref mut k) = self.enc_key {
             zero_sensitive(k);
         }
+        if let Some(ref mut keys) = self.own_keys {
+            for row in keys.iter_mut() {
+                zero_sensitive(row);
+            }
+        }
         zero_sensitive(&mut self.address);
         zero_sensitive(&mut self.signed_psbt_b64);
         zero_sensitive(&mut self.salt);
+        zero_sensitive(&mut self.descriptor);
 
         // Clear the mnemonic word pointers. `words` is `[&'static str; 24]`
         // where each element points into the BIP39 static word-list. The
@@ -616,6 +653,8 @@ fn step(state: AppState, event: WalletEvent, stored_pin: Option<[u8; 6]>) -> Ste
             step_accounts(x, y),
         AppState::Settings =>
             step_settings(x, y, &entropy),
+        AppState::Descriptor =>
+            step_descriptor(x, y),
         AppState::ShowMnemonic { page } =>
             step_show_mnemonic(x, y, page),
         AppState::About =>
@@ -794,6 +833,8 @@ fn step_settings(x: i32, y: i32, entropy: &[u8; 32]) -> StepResult {
             gate: PinGate::ChangePin,
         }, None, None, None)
     } else if in_rect(x, y, SETTINGS_BTN_X, SETTINGS_Y2, SETTINGS_BTN_W, SETTINGS_BTN_H) {
+        (AppState::Descriptor, None, None, None)
+    } else if in_rect(x, y, SETTINGS_BTN_X, SETTINGS_Y3, SETTINGS_BTN_W, SETTINGS_BTN_H) {
         (AppState::About, None, None, None)
     } else if in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H) {
         (AppState::Home, None, None, None)
@@ -824,6 +865,14 @@ fn step_about(x: i32, y: i32) -> StepResult {
         (AppState::Settings, None, None, None)
     } else {
         (AppState::About, None, None, None)
+    }
+}
+
+fn step_descriptor(x: i32, y: i32) -> StepResult {
+    if in_rect(x, y, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H) {
+        (AppState::Settings, None, None, None)
+    } else {
+        (AppState::Descriptor, None, None, None)
     }
 }
 
@@ -1443,8 +1492,8 @@ mod tests {
         w.state = AppState::SignScan;
         // Bytes that are not valid base64 (contains characters outside alphabet).
         let bad_b64 = b"!!!not-valid-base64!!!";
-        let mut data = [0u8; 512];
-        let len = bad_b64.len().min(512);
+        let mut data = [0u8; MAX_PSBT_B64];
+        let len = bad_b64.len().min(data.len());
         data[..len].copy_from_slice(&bad_b64[..len]);
         w.handle_event(WalletEvent::PsbtScanned { data, len }, &mut |_: &_| {});
         assert!(w.scan_error(), "scan_error must be true after bad base64");
@@ -1458,7 +1507,7 @@ mod tests {
         // "AAAA" is valid base64 that decodes to three zero bytes — not a
         // valid PSBT, so ParsedPsbt::parse should return Err.
         let garbage_b64 = b"AAAA";
-        let mut data = [0u8; 512];
+        let mut data = [0u8; MAX_PSBT_B64];
         data[..garbage_b64.len()].copy_from_slice(garbage_b64);
         w.handle_event(WalletEvent::PsbtScanned { data, len: garbage_b64.len() }, &mut |_: &_| {});
         assert!(w.scan_error(), "scan_error must be true after invalid PSBT bytes");
@@ -1470,7 +1519,7 @@ mod tests {
         let mut w = ColdWallet::new();
         w.state = AppState::SignScan;
         // Set scan_error via a bad scan.
-        let mut data = [0u8; 512]; data[0] = b'!';
+        let mut data = [0u8; MAX_PSBT_B64]; data[0] = b'!';
         w.handle_event(WalletEvent::PsbtScanned { data, len: 1 }, &mut |_: &_| {});
         assert!(w.scan_error(), "pre-condition: scan_error should be set");
 

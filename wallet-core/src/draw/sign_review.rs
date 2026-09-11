@@ -14,15 +14,16 @@ use super::{draw_button, white_stroke, white_text};
 ///
 /// ALL outputs are listed, each on its own pair of rows:
 ///   row 1: full `bc1p…` address (62 chars, no truncation) — or a warning for non-P2TR
-///   row 2: amount in sats, tagged "(change)" if this is our own change output
+///   row 2: amount in sats, tagged "(change)" if this is one of our own outputs
 ///
-/// Change is identified ONLY by re-deriving `our_output_key` and matching the
-/// 32-byte witness program in the scriptPubKey — no host-provided metadata is
-/// trusted. If `our_output_key` is `None` every output is treated as a send.
+/// Change is identified ONLY by matching the witness program against the
+/// wallet's derived output keys across the whole derivation window (F-04) —
+/// no host-provided metadata is trusted. If `own_output_keys` is `None`
+/// every output is treated as a send.
 pub fn draw<D>(
     display:        &mut D,
     psbt:           Option<&ParsedPsbt>,
-    our_output_key: Option<[u8; 32]>,
+    own_output_keys: Option<&[[u8; 32]]>,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
@@ -46,7 +47,7 @@ where
 
         for i in 0..p.output_count {
             let out = &p.outputs[i];
-            if !is_change(out, our_output_key.as_ref()) {
+            if !is_change(out, own_output_keys) {
                 send_total = send_total.saturating_add(out.amount_sats);
             }
         }
@@ -101,7 +102,7 @@ where
             let addr_y = slot_y + ADDR_H;
             let meta_y = slot_y + OUTPUT_SLOT - 2; // 2px from bottom of slot
 
-            let change = is_change(out, our_output_key.as_ref());
+            let change = is_change(out, own_output_keys);
 
             // Row 1: full address or non-P2TR warning
             let mut addr_buf = [0u8; 62];
@@ -155,18 +156,18 @@ where
 
 // ── Classification ────────────────────────────────────────────────────────────
 
-/// Returns `true` only if `out` is our own change, verified by re-deriving the
-/// wallet's output key and comparing to the 32-byte witness program in the
-/// scriptPubKey (P2TR, `OP_1 OP_PUSHBYTES_32 <key>`).
+/// Returns `true` only if `out` is one of our own outputs, verified by
+/// matching the 32-byte witness program against the wallet's derived output
+/// keys across the derivation window (receive 0/0..20, change 1/0..20).
 ///
-/// If `our_output_key` is `None` (seed temporarily unloaded / not available)
+/// If `own_output_keys` is `None` (seed temporarily unloaded / not available)
 /// this function returns `false` — treating every output as a send is the safe
 /// default, because accepting host-provided metadata (PSBT_OUT_TAP_INTERNAL_KEY)
 /// would allow a malicious coordinator to disguise its own output as change.
-fn is_change(out: &TxOutput, our_output_key: Option<&[u8; 32]>) -> bool {
-    let Some(ok) = our_output_key else { return false };
+fn is_change(out: &TxOutput, own_output_keys: Option<&[[u8; 32]]>) -> bool {
+    let Some(keys) = own_output_keys else { return false };
     let Some(wp) = output_witness_program(out) else { return false };
-    wp == ok
+    keys.iter().any(|ok| wp == ok)
 }
 
 fn output_witness_program(out: &TxOutput) -> Option<&[u8; 32]> {
@@ -274,7 +275,7 @@ mod tests {
     fn is_change_matches_own_output_key() {
         let our = [0xaa; 32];
         let out = p2tr_output(50_000, our);
-        assert!(is_change(&out, Some(&our)));
+        assert!(is_change(&out, Some(core::slice::from_ref(&our))));
     }
 
     #[test]
@@ -282,7 +283,38 @@ mod tests {
         let our   = [0xaa; 32];
         let other = [0xbb; 32];
         let out = p2tr_output(50_000, other);
-        assert!(!is_change(&out, Some(&our)));
+        assert!(!is_change(&out, Some(core::slice::from_ref(&our))));
+    }
+
+    #[test]
+    fn is_change_matches_change_branch_key() {
+        // F-04: an output to our own change branch (1/0) is recognised as
+        // change when the full derivation window is provided.
+        use crate::derive::{own_output_keys, tap_xonly_at, taproot_tweak_pub, CHANGE_BRANCH};
+
+        let mut seed = [0u8; 64];
+        seed[0] = 1;
+        let change_ik = tap_xonly_at(&seed, CHANGE_BRANCH, 0).unwrap();
+        let change_ok = taproot_tweak_pub(&change_ik).unwrap();
+        let window = own_output_keys(&seed).unwrap();
+
+        let out = p2tr_output(50_000, change_ok);
+        assert!(is_change(&out, Some(&window[..])));
+    }
+
+    #[test]
+    fn is_change_matches_second_receive_index() {
+        // F-04: an output to receive index 3 is recognised too.
+        use crate::derive::{own_output_keys, tap_xonly_at, taproot_tweak_pub, RECEIVE_BRANCH};
+
+        let mut seed = [0u8; 64];
+        seed[0] = 1;
+        let ik3 = tap_xonly_at(&seed, RECEIVE_BRANCH, 3).unwrap();
+        let ok3 = taproot_tweak_pub(&ik3).unwrap();
+        let window = own_output_keys(&seed).unwrap();
+
+        let out = p2tr_output(50_000, ok3);
+        assert!(is_change(&out, Some(&window[..])));
     }
 
     #[test]
@@ -294,7 +326,7 @@ mod tests {
         let mut out = p2tr_output(50_000, other);
         out.tap_internal_key = Some([0; 32]); // bogus metadata
         // We pass our_output_key so direct check wins → not change.
-        assert!(!is_change(&out, Some(&our)));
+        assert!(!is_change(&out, Some(core::slice::from_ref(&our))));
     }
 
     /// L4: when our_output_key is None, host-flagged outputs must NOT be
@@ -310,20 +342,22 @@ mod tests {
     #[test]
     fn is_change_false_for_non_p2tr_even_with_matching_key() {
         // Non-P2TR outputs can never be our change.
+        let our = [0xaa; 32];
         let out = non_p2tr_output(10_000);
-        assert!(!is_change(&out, Some(&[0xaa; 32])));
+        assert!(!is_change(&out, Some(core::slice::from_ref(&our))));
     }
 
     // ── output_address tests ──────────────────────────────────────────────
 
     #[test]
-    fn output_address_produces_bc1p() {
+    fn output_address_produces_p2tr() {
+        // The compiled network is testnet, so review-screen addresses are tb1p.
         let wp = [0x42u8; 32];
         let out = p2tr_output(1000, wp);
         let mut buf = [0u8; 62];
         let s = output_address(&out, &mut buf).unwrap();
         assert_eq!(s.len(), 62);
-        assert!(s.starts_with("bc1p"));
+        assert!(s.starts_with("tb1p"));
     }
 
     #[test]
@@ -426,13 +460,13 @@ mod tests {
         let change_out = p2tr_output(20_000, our_key);
         let send_out   = p2tr_output(80_000, their_key);
 
-        assert!( is_change(&change_out, Some(&our_key)));
-        assert!(!is_change(&send_out,   Some(&our_key)));
+        assert!( is_change(&change_out, Some(core::slice::from_ref(&our_key))));
+        assert!(!is_change(&send_out,   Some(core::slice::from_ref(&our_key))));
 
         // send_total computation mirrors draw()
         let outputs = [&send_out, &change_out];
         let send_total: u64 = outputs.iter()
-            .filter(|o| !is_change(o, Some(&our_key)))
+            .filter(|o| !is_change(o, Some(core::slice::from_ref(&our_key))))
             .map(|o| o.amount_sats)
             .sum();
         assert_eq!(send_total, 80_000);

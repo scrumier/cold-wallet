@@ -3,9 +3,6 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::geometry::Point;
 use embedded_graphics::mono_font::MonoTextStyle;
-#[cfg(feature = "std")]
-use embedded_graphics::primitives::PrimitiveStyleBuilder;
-use embedded_graphics::primitives::Rectangle;
 use embedded_graphics::text::{Alignment::Center, Text};
 
 use crate::layout::{SCREEN_W, QR_X, QR_Y, QR_SIZE, NAV_PREV_X, NAV_BTN_Y, NAV_BTN_W, NAV_BTN_H};
@@ -22,7 +19,7 @@ where
 
     match address {
         Some(addr) => {
-            // bc1p address is 62 chars — display as two 31-char lines.
+            // bc1p/tb1p address is 62 chars — display as two 31-char lines.
             let (line1, line2) = addr.split_at(31);
             Text::with_alignment(line1, Point::new(SCREEN_W / 2, 65), small, Center)
                 .draw(display)?;
@@ -40,7 +37,7 @@ where
             )
             .draw(display)?;
 
-            draw_qr_placeholder(display)?;
+            super::draw_qr_placeholder(display, QR_X, QR_Y, QR_SIZE)?;
         }
     }
 
@@ -51,16 +48,13 @@ where
 
 // ── QR rendering ─────────────────────────────────────────────────────────────
 
-#[cfg(feature = "std")]
+/// Uppercases for QR alphanumeric mode (more efficient than byte mode, and
+/// standard practice — verifying software lowercases before validation),
+/// then delegates to the shared renderer.
 fn draw_qr<D>(display: &mut D, address: &str) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    use qrcode::{EcLevel, QrCode};
-    use qrcode::types::Color as QrColor;
-
-    // Uppercase for QR alphanumeric mode: more efficient than byte mode,
-    // and standard practice — verifying software lowercases before validation.
     let mut upper = [0u8; 62];
     let bytes = address.as_bytes();
     let len = bytes.len().min(upper.len());
@@ -68,72 +62,7 @@ where
         upper[i] = b.to_ascii_uppercase();
     }
 
-    let qr = match QrCode::with_error_correction_level(&upper[..len], EcLevel::M) {
-        Ok(q) => q,
-        Err(_) => return draw_qr_placeholder(display),
-    };
-
-    let modules = qr.width();
-
-    // Scale to fit QR_SIZE pixels with a 4-module quiet zone on each side.
-    let total_modules = modules + 8; // 4 quiet-zone modules per side
-    let module_px = (QR_SIZE as usize / total_modules).max(1);
-    let px_used = total_modules * module_px;
-    let border = ((QR_SIZE as usize).saturating_sub(px_used) / 2) as i32;
-    let quiet_px = (4 * module_px) as i32;
-    let origin_x = QR_X + border + quiet_px;
-    let origin_y = QR_Y + border + quiet_px;
-
-    let fill_white = PrimitiveStyleBuilder::new().fill_color(Rgb565::WHITE).build();
-    let fill_black = PrimitiveStyleBuilder::new().fill_color(Rgb565::BLACK).build();
-
-    // White background including quiet zone.
-    Rectangle::new(Point::new(QR_X, QR_Y), Size::new(QR_SIZE as u32, QR_SIZE as u32))
-        .into_styled(fill_white)
-        .draw(display)?;
-
-    // Dark modules — qr[(col, row)] per the qrcode crate's Index impl.
-    let mpx = module_px as u32;
-    for row in 0..modules {
-        for col in 0..modules {
-            if qr[(col, row)] == QrColor::Dark {
-                let px = origin_x + (col * module_px) as i32;
-                let py = origin_y + (row * module_px) as i32;
-                Rectangle::new(Point::new(px, py), Size::new(mpx, mpx))
-                    .into_styled(fill_black)
-                    .draw(display)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn draw_qr_placeholder<D>(display: &mut D) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = Rgb565>,
-{
-    Rectangle::new(Point::new(QR_X, QR_Y), Size::new(QR_SIZE as u32, QR_SIZE as u32))
-        .into_styled(white_stroke(2))
-        .draw(display)?;
-
-    Text::with_alignment(
-        "QR",
-        Point::new(SCREEN_W / 2, QR_Y + QR_SIZE / 2 + 7),
-        white_text(),
-        Center,
-    )
-    .draw(display)?;
-
-    Ok(())
-}
-
-#[cfg(not(feature = "std"))]
-fn draw_qr<D>(display: &mut D, _address: &str) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = Rgb565>,
-{
-    draw_qr_placeholder(display)
+    super::draw_qr_data(display, &upper[..len], QR_X, QR_Y, QR_SIZE)
 }
 
 #[cfg(test)]

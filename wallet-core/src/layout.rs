@@ -70,18 +70,30 @@ pub const SIGN_VF_H: i32 = 300;
 pub const SIGN_VF_X: i32 = (SCREEN_W - SIGN_VF_W) / 2;
 pub const SIGN_VF_Y: i32 = 70;
 
+// SD file list (rendered inside the sign viewfinder; the simulator taps here)
+pub const SD_FILES_MAX: usize = 4;
+pub const SD_FILE_X: i32 = SIGN_VF_X + 10;
+pub const SD_FILE_W: i32 = SIGN_VF_W - 20;
+pub const SD_FILE_H: i32 = 60;
+pub const SD_FILE_STEP: i32 = 70;
+/// Touch Y of row `i`: SIGN_VF_Y + 8 + i * SD_FILE_STEP
+pub const fn sd_file_y(i: usize) -> i32 {
+    SIGN_VF_Y + 8 + (i as i32) * SD_FILE_STEP
+}
+
 // Receive screen
 pub const QR_SIZE: i32 = 240;
 pub const QR_X: i32    = (SCREEN_W - QR_SIZE) / 2;
 pub const QR_Y: i32    = 110;
 
-// Settings screen
+// Settings screen (4 buttons, above the back button at Y=410)
 pub const SETTINGS_BTN_W: i32 = 360;
 pub const SETTINGS_BTN_H: i32 = 60;
 pub const SETTINGS_BTN_X: i32 = (SCREEN_W - SETTINGS_BTN_W) / 2;
-pub const SETTINGS_Y0: i32    = 120;
-pub const SETTINGS_Y1: i32    = 210;
-pub const SETTINGS_Y2: i32    = 300;
+pub const SETTINGS_Y0: i32 = 100;
+pub const SETTINGS_Y1: i32 = 170;
+pub const SETTINGS_Y2: i32 = 240;
+pub const SETTINGS_Y3: i32 = 310;
 
 // RestoreWallet input + suggestion strip (sits above the QWERTY keyboard at KB_Y=115)
 pub const RESTORE_PROGRESS_Y: i32 = 45;

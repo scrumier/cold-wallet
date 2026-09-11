@@ -1,11 +1,11 @@
-//! BIP341 Taproot key-path sighash (SIGHASH_ALL = 0x00, no annex).
+//! BIP341 Taproot key-path sighash (SIGHASH_DEFAULT, hash_type 0x00, no annex).
 
 use bitcoin_hashes::{sha256, HashEngine};
 
 use crate::psbt::ParsedPsbt;
 
 /// Computes the BIP341 Taproot sighash for the given input index.
-/// Assumes SIGHASH_ALL (hash_type = 0x00), key-path spend, no annex.
+/// Assumes SIGHASH_DEFAULT (hash_type = 0x00), key-path spend, no annex.
 pub fn taproot_sighash(psbt: &ParsedPsbt, input_idx: usize) -> [u8; 32] {
     debug_assert!(input_idx < psbt.input_count);
 
@@ -26,7 +26,7 @@ pub fn taproot_sighash(psbt: &ParsedPsbt, input_idx: usize) -> [u8; 32] {
     let mut p   = 0usize;
 
     pre[p] = 0x00; p += 1; // sighash epoch
-    pre[p] = 0x00; p += 1; // hash_type = SIGHASH_ALL
+    pre[p] = 0x00; p += 1; // hash_type = SIGHASH_DEFAULT (matches signing.rs guard)
     pre[p..p + 4].copy_from_slice(&(psbt.version as u32).to_le_bytes()); p += 4;
     pre[p..p + 4].copy_from_slice(&psbt.locktime.to_le_bytes());          p += 4;
     pre[p..p + 32].copy_from_slice(&sha_prevouts);       p += 32;
