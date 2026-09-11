@@ -1008,10 +1008,8 @@ fn generate_words(entropy: &[u8; 32]) -> [&'static str; 24] {
 /// `entropy` must come from the TRNG; on the simulator it is `getrandom`.
 pub fn shuffle(entropy: &[u8; 32]) -> [u8; 10] {
     let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
-    for chunk in entropy.chunks_exact(8) {
-        let mut b = [0u8; 8];
-        b.copy_from_slice(chunk);
-        s ^= u64::from_le_bytes(b);
+    for chunk in entropy.as_chunks::<8>().0 {
+        s ^= u64::from_le_bytes(*chunk);
         s = s.rotate_left(17);
     }
     let mut next = || {
