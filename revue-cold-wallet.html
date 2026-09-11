@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="fr">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Revue cold-wallet H747</title>
+<style>
+  :root {
+    --ground:    #F2F4F3;
+    --surface:   #FBFCFB;
+    --ink:       #16201F;
+    --ink-soft:  #47585A;
+    --ink-faint: #7C8C8D;
+    --rule:      #D2DAD8;
+    --rule-soft: #E4EAE8;
+    --accent:    #0B5E63;
+    --accent-bg: #E2EDEC;
+    --crit:      #A8271F;
+    --warn:      #8A6206;
+    --good:      #1B6340;
+    --crit-bg:   #F6E6E4;
+    --warn-bg:   #F5EDDC;
+    --good-bg:   #E3EFE8;
+
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --mono:  ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+    --measure: 68ch;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:    #101717;
+      --surface:   #16201F;
+      --ink:       #E6ECEA;
+      --ink-soft:  #A2B2B2;
+      --ink-faint: #748686;
+      --rule:      #2C3A39;
+      --rule-soft: #212D2C;
+      --accent:    #63C7CB;
+      --accent-bg: #17302F;
+      --crit:      #E8867C;
+      --warn:      #D8AE55;
+      --good:      #6FBF93;
+      --crit-bg:   #2B1D1B;
+      --warn-bg:   #2A2317;
+      --good-bg:   #17281F;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:    #101717;
+    --surface:   #16201F;
+    --ink:       #E6ECEA;
+    --ink-soft:  #A2B2B2;
+    --ink-faint: #748686;
+    --rule:      #2C3A39;
+    --rule-soft: #212D2C;
+    --accent:    #63C7CB;
+    --accent-bg: #17302F;
+    --crit:      #E8867C;
+    --warn:      #D8AE55;
+    --good:      #6FBF93;
+    --crit-bg:   #2B1D1B;
+    --warn-bg:   #2A2317;
+    --good-bg:   #17281F;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 24px 96px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 940px;
+    margin: 0 auto;
+  }
+
+  /* ── Masthead ─────────────────────────────────────────── */
+
+  header.masthead {
+    padding: 56px 0 28px;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 18px;
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-size: clamp(34px, 5.4vw, 52px);
+    line-height: 1.06;
+    letter-spacing: -0.02em;
+    font-weight: 600;
+    margin: 0 0 20px;
+    text-wrap: balance;
+    max-width: 20ch;
+  }
+
+  .standfirst {
+    font-size: 19px;
+    color: var(--ink-soft);
+    max-width: var(--measure);
+    margin: 0;
+  }
+
+  /* ── Fact block ───────────────────────────────────────── */
+
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border-bottom: 1px solid var(--rule);
+    margin: 0 0 8px;
+  }
+
+  .fact {
+    background: var(--surface);
+    padding: 16px 18px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .fact dt {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+
+  .fact dd {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.4;
+  }
+
+  .fact dd.ok   { color: var(--good); }
+  .fact dd.bad  { color: var(--crit); }
+  .fact dd.mid  { color: var(--warn); }
+
+  /* ── Sections ─────────────────────────────────────────── */
+
+  section { margin: 0; padding: 52px 0 0; }
+
+  .sec-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    border-bottom: 1px solid var(--ink);
+    padding-bottom: 8px;
+    margin-bottom: 26px;
+  }
+
+  .sec-num {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+    flex: none;
+  }
+
+  h2 {
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: -0.012em;
+    margin: 0;
+    line-height: 1.2;
+  }
+
+  h3 {
+    font-size: 19px;
+    font-weight: 600;
+    margin: 34px 0 10px;
+    letter-spacing: -0.008em;
+  }
+
+  p { max-width: var(--measure); margin: 0 0 16px; }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  strong { font-weight: 600; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--rule-soft);
+    padding: 1px 4px;
+    border-radius: 2px;
+  }
+
+  ul, ol { max-width: var(--measure); padding-left: 20px; margin: 0 0 16px; }
+  li { margin-bottom: 8px; }
+
+  .lede {
+    font-size: 18.5px;
+    color: var(--ink-soft);
+    max-width: var(--measure);
+    margin: 0 0 24px;
+  }
+
+  /* ── Findings ─────────────────────────────────────────── */
+
+  .finding {
+    display: grid;
+    grid-template-columns: 78px 1fr;
+    gap: 0 22px;
+    padding: 22px 0;
+    border-top: 1px solid var(--rule);
+  }
+  .finding:last-of-type { border-bottom: 1px solid var(--rule); }
+
+  .f-id {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-faint);
+    padding-top: 3px;
+    letter-spacing: 0.04em;
+  }
+
+  .f-body { min-width: 0; }
+
+  .f-title {
+    font-size: 18.5px;
+    font-weight: 600;
+    margin: 0 0 4px;
+    letter-spacing: -0.008em;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .chip {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+    font-weight: 400;
+  }
+  .chip.crit { color: var(--crit); background: var(--crit-bg); }
+  .chip.warn { color: var(--warn); background: var(--warn-bg); }
+  .chip.info { color: var(--accent); background: var(--accent-bg); }
+
+  .f-loc {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-faint);
+    margin: 0 0 10px;
+  }
+
+  .f-body p { margin-bottom: 12px; }
+  .f-body p:last-child { margin-bottom: 0; }
+
+  .fix {
+    font-size: 15.5px;
+    color: var(--ink-soft);
+    border-left: 2px solid var(--accent);
+    padding-left: 14px;
+    margin-top: 12px;
+    max-width: calc(var(--measure) - 4ch);
+  }
+  .fix b {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 2px;
+    font-weight: 400;
+  }
+
+  /* ── Callout ──────────────────────────────────────────── */
+
+  .callout {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-top: 3px solid var(--accent);
+    padding: 22px 24px;
+    margin: 28px 0;
+  }
+  .callout h3 { margin-top: 0; }
+  .callout p:last-child { margin-bottom: 0; }
+
+  /* ── Table ────────────────────────────────────────────── */
+
+  .tbl-scroll { overflow-x: auto; margin: 0 0 22px; }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 560px;
+    font-size: 15px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 14px 10px 0;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+  }
+  th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    border-bottom: 1px solid var(--rule);
+    font-weight: 400;
+  }
+  td.mono { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+  /* ── Steps ────────────────────────────────────────────── */
+
+  ol.steps { list-style: none; padding: 0; max-width: var(--measure); counter-reset: s; }
+  ol.steps > li {
+    counter-increment: s;
+    display: grid;
+    grid-template-columns: 40px 1fr;
+    gap: 0 18px;
+    padding: 16px 0;
+    border-top: 1px solid var(--rule-soft);
+    margin: 0;
+  }
+  ol.steps > li::before {
+    content: counter(s, decimal-leading-zero);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    padding-top: 3px;
+  }
+  ol.steps b { display: block; font-weight: 600; margin-bottom: 2px; }
+  ol.steps span { color: var(--ink-soft); font-size: 15.5px; }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 20px;
+    border-top: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-faint);
+    letter-spacing: 0.03em;
+  }
+
+  @media (max-width: 620px) {
+    body { font-size: 16px; padding: 0 18px 64px; }
+    .finding { grid-template-columns: 1fr; gap: 0; }
+    .f-id { padding-top: 0; margin-bottom: 6px; }
+    ol.steps > li { grid-template-columns: 30px 1fr; gap: 0 12px; }
+  }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">Revue technique · 14 août 2026 · commit 9404a10</p>
+  <h1>Ce que le cold-wallet tient, et ce qu&rsquo;il ne tient pas encore</h1>
+  <p class="standfirst">Le noyau cryptographique est meilleur que ce à quoi je m&rsquo;attendais — il compile vraiment en <code>no_std</code>, il signe et il se re-vérifie. Le canal d&rsquo;entrée/sortie, lui, n&rsquo;existe pas, et le modèle de sécurité repose sur un PIN à six chiffres qui tombe en deux minutes sur un GPU.</p>
+</header>
+
+<dl class="facts">
+  <div class="fact">
+    <dt>Tests</dt>
+    <dd class="ok">83 / 83 ✓</dd>
+  </div>
+  <div class="fact">
+    <dt>Build cible bare-metal</dt>
+    <dd class="ok">thumbv7em ✓</dd>
+  </div>
+  <div class="fact">
+    <dt>Décodeur QR</dt>
+    <dd class="bad">0 ligne</dd>
+  </div>
+  <div class="fact">
+    <dt>Accélérateur SHA-256 sur H747</dt>
+    <dd class="bad">absent</dd>
+  </div>
+  <div class="fact">
+    <dt>PBKDF2 par saisie de PIN</dt>
+    <dd class="mid">~0,7 s Mac → 5–15 s M7</dd>
+  </div>
+  <div class="fact">
+    <dt>Brute-force du PIN hors ligne</dt>
+    <dd class="bad">~2 min / 1 GPU</dd>
+  </div>
+</dl>
+
+<section>
+  <div class="sec-head"><span class="sec-num">§1</span><h2>Verdict</h2></div>
+
+  <p class="lede">Tu as construit la moitié difficile-mais-bien-balisée, et pas encore la moitié difficile-et-mal-balisée. C&rsquo;est le schéma classique quand on développe avec une IA : elle est excellente sur ce qui a une spécification écrite (BIP32, BIP340, BIP341, PBKDF2, bech32m) et elle contourne silencieusement ce qui n&rsquo;en a pas (lire un QR abîmé sur une image de caméra, effacer un secteur de flash sans se couper le courant dessus).</p>
+
+  <p>Concrètement : <code>wallet-core</code> compile pour <code>thumbv7em-none-eabihf</code> sans <code>std</code> — je l&rsquo;ai vérifié, ça passe du premier coup avec toutes les dépendances crypto. C&rsquo;est loin d&rsquo;être acquis avec <code>k256</code> + <code>bip32</code> + <code>bip39</code>, et ça veut dire que le portage n&rsquo;est pas bloqué par la couche crypto. Les 83 tests passent, dont un qui signe un PSBT puis re-vérifie la signature Schnorr avec le vérificateur de <code>k256</code> : le pipeline dérivation → tweak Taproot → sighash → signature est mathématiquement cohérent de bout en bout.</p>
+
+  <p>En face : le simulateur ne scanne rien. Ce que le code appelle « scan » est un clic dans un rectangle qui injecte un PSBT fabriqué localement (<code>wallet-sim/src/main.rs</code>, <code>make_test_psbt_b64</code>). Il n&rsquo;y a pas de webcam — <code>nokhwa</code> n&rsquo;est même pas dans le <code>Cargo.toml</code>, contrairement à ce qu&rsquo;affirme le <code>CLAUDE.md</code>. Et la génération de QR est derrière la feature <code>std</code> : sur la carte, aujourd&rsquo;hui, ni l&rsquo;entrée ni la sortie du canal air-gap ne fonctionnent.</p>
+
+  <p>Donc : bonne fondation, produit non fonctionnel, et un choix de matériel qui te coûte cher pour ce qu&rsquo;il t&rsquo;apporte. Le détail suit.</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">§2</span><h2>Ce qui tient vraiment</h2></div>
+
+  <p>Je liste ces points parce qu&rsquo;ils sont réels et qu&rsquo;il ne faut pas les casser dans les refactos à venir.</p>
+
+  <ul>
+    <li><strong>La séparation core / plateforme est propre.</strong> <code>draw_ui</code> générique sur <code>DrawTarget&lt;Color = Rgb565&gt;</code>, aucune dépendance plateforme dans <code>wallet-core</code>, persistance injectée par closure <code>persist(&amp;blob)</code>. Le crate <code>wallet-h747</code> aura vraiment un périmètre borné.</li>
+    <li><strong>La détection de change ne fait pas confiance au PSBT.</strong> <code>sign_review.rs</code> re-dérive la clé de sortie tweakée et compare au witness program, au lieu de croire <code>PSBT_OUT_TAP_INTERNAL_KEY</code>. Si la clé n&rsquo;est pas disponible, tout est traité comme un envoi. C&rsquo;est exactement le bon réflexe — des wallets réels se sont fait voler leur change en faisant l&rsquo;inverse.</li>
+    <li><strong>Les garde-fous de signature sont sérieux.</strong> Refus de signer sans witness UTXO, refus si le scriptPubKey de l&rsquo;UTXO n&rsquo;est pas <em>notre</em> sortie P2TR, refus des sighash exotiques, <code>aux_rand</code> BIP340 passé depuis l&rsquo;entropie d&rsquo;événement.</li>
+    <li><strong>La zeroization est cohérente et pas décorative.</strong> <code>write_volatile</code> partout, <code>Zeroize</code> sur les <code>Scalar</code> <em>et</em> sur leur négation, <code>Drop</code> sur <code>Secrets</code> et <code>ColdWallet</code>. Le détail qui montre que quelqu&rsquo;un a réfléchi : l&rsquo;effacement du tableau <code>[&amp;'static str; 24]</code>, parce que la <em>suite de pointeurs</em> vers la wordlist encode déjà la mnémonique.</li>
+    <li><strong>Le format disque v3 est bien pensé.</strong> AEAD ChaCha20-Poly1305, version + salt liés en AAD (impossible de downgrader ou de permuter le salt), compteur d&rsquo;échecs écrit <em>avant</em> la vérification, avec <code>fsync</code> fichier puis <code>fsync</code> répertoire côté simulateur. Le raisonnement « on ne peut pas rembobiner le compteur en coupant le courant » est correct.</li>
+    <li><strong>Les parseurs sont bornés.</strong> Base64 et PSBT écrits à la main, sans <code>alloc</code>, avec vérification de bornes sur chaque lecture et des vecteurs de test connus (RFC 4231, RFC 7914). C&rsquo;est le code qui mange de l&rsquo;entrée hostile, et il est correct.</li>
+  </ul>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">§3</span><h2>Défauts de correction</h2></div>
+
+  <p class="lede">Six points où le code fait quelque chose de subtilement faux. Aucun ne perd de fonds tout seul, mais F-01 et F-02 produisent des signatures qu&rsquo;un logiciel tiers peut refuser, ce qui est le pire des cas pour un signer : tu crois avoir signé, tu ne peux pas diffuser.</p>
+
+  <div class="finding">
+    <div class="f-id">F-01</div>
+    <div class="f-body">
+      <p class="f-title">Le sighash ignore le type de sighash déclaré <span class="chip crit">correction</span></p>
+      <p class="f-loc">wallet-core/src/sighash.rs:715 · wallet-core/src/signing.rs:366</p>
+      <p><code>taproot_sighash</code> écrit <code>hash_type = 0x00</code> en dur dans le préimage, alors que <code>sign_psbt</code> accepte explicitement <code>sighash_type = Some(1)</code>. Un input qui déclare <code>SIGHASH_ALL</code> (0x01) reçoit donc une signature <code>SIGHASH_DEFAULT</code> de 64 octets. Elle est valide au sens du consensus, mais elle ne correspond pas au type demandé : un finalizer strict (Bitcoin Core, Sparrow) refusera de finaliser, ou finalisera une transaction qui n&rsquo;est pas celle que l&rsquo;hôte croyait construire.</p>
+      <p class="fix"><b>Correctif</b>Soit refuser <code>Some(1)</code> aux côtés des autres types non supportés — le plus simple et le plus sûr —, soit propager le type dans le préimage et émettre 65 octets avec le byte de sighash en suffixe.</p>
+    </div>
+  </div>
+
+  <div class="finding">
+    <div class="f-id">F-02</div>
+    <div class="f-body">
+      <p class="f-title">Le PSBT signé est reconstruit, pas complété <span class="chip crit">correction</span></p>
+      <p class="f-loc">wallet-core/src/psbt.rs · <code>encode_signed</code>, <code>serialize_unsigned_tx</code></p>
+      <p>Le PSBT renvoyé est ré-assemblé depuis les champs parsés. Tout ce que le parseur ignore est perdu : les dérivations BIP32, <code>PSBT_IN_SIGHASH_TYPE</code>, les clés inconnues, le non-witness UTXO. BIP174 demande qu&rsquo;un Signer préserve ce qu&rsquo;il ne comprend pas, justement pour que les autres participants puissent continuer.</p>
+      <p>Plus gênant : la transaction non signée est <em>re-sérialisée</em> depuis les champs parsés. Pour un tx canonique le résultat est identique octet pour octet, donc ça marchera la plupart du temps — mais tu signes ce que tu as reparsé, pas ce que tu as reçu, et c&rsquo;est précisément l&rsquo;invariant qu&rsquo;un signer air-gap doit garantir. Le code avait clairement l&rsquo;intention de faire mieux : <code>tx_start</code> et <code>tx_end</code> sont calculés dans <code>parse</code>, puis jetés par un <code>let _ =</code>.</p>
+      <p class="fix"><b>Correctif</b>Conserver le slice brut de <code>PSBT_GLOBAL_UNSIGNED_TX</code> et le réémettre tel quel. Idéalement, garder aussi le buffer PSBT d&rsquo;origine et n&rsquo;y insérer que les <code>PSBT_IN_TAP_KEY_SIG</code>.</p>
+    </div>
+  </div>
+
+  <div class="finding">
+    <div class="f-id">F-03</div>
+    <div class="f-body">
+      <p class="f-title">Trois limites de taille incompatibles entre elles <span class="chip warn">robustesse</span></p>
+      <p class="f-loc">state.rs · <code>WalletEvent::PsbtScanned { data: [u8; 512] }</code> vs <code>MAX_PSBT_RAW = 2048</code></p>
+      <p>L&rsquo;événement de scan transporte 512 octets de base64, soit <strong>384 octets de PSBT</strong> au maximum. Mais le parseur accepte 2048 octets et jusqu&rsquo;à 5 inputs. Un PSBT réaliste à 1 input / 2 outputs avec les chemins de dérivation fait déjà 300 à 500 octets ; à deux inputs, tu dépasses systématiquement. L&rsquo;utilisateur verra « PSBT rejected » sans jamais comprendre pourquoi, et les tests ne l&rsquo;attrapent pas parce que le PSBT de test du simulateur est minimal.</p>
+      <p class="fix"><b>Correctif</b>Aligner les trois constantes sur une seule, et ajouter un test qui refuse de compiler si <code>MAX_PSBT_RAW</code> dépasse la capacité du buffer de scan.</p>
+    </div>
+  </div>
+
+  <div class="finding">
+    <div class="f-id">F-04</div>
+    <div class="f-body">
+      <p class="f-title">Un seul index d&rsquo;adresse, donc la revue de transaction peut mentir <span class="chip crit">correction</span></p>
+      <p class="f-loc">wallet-core/src/derive.rs · chemin figé <code>m/86'/0'/0'/0/0</code></p>
+      <p>La dérivation est câblée sur le premier index de la première branche. Deux conséquences directes, toutes les deux visibles par l&rsquo;utilisateur. Si l&rsquo;hôte envoie le change sur <code>m/86'/0'/0'/1/0</code> — ce que fait tout wallet normal —, l&rsquo;écran de revue l&rsquo;affichera comme <strong>un envoi à un inconnu</strong>. Et un input qui dépense une adresse autre que l&rsquo;index 0 ne sera tout simplement pas signé (<code>NoMatchingInput</code>).</p>
+      <p>L&rsquo;écran « Comptes » est un bouton mort qui ne mène qu&rsquo;à un « Retour », alors que le <code>CLAUDE.md</code> annonce le multi-compte. Ce n&rsquo;est pas un manque cosmétique : la promesse WYSIWYS de l&rsquo;écran de revue ne tient qu&rsquo;avec un vrai scan de la fenêtre de dérivation.</p>
+      <p class="fix"><b>Correctif</b>Balayer un gap fixe (par exemple change <code>1/0..20</code> et receive <code>0/0..20</code>) pour classer chaque output et pour matcher les inputs. Ça reste du no-alloc, c&rsquo;est ~20 dérivations BIP32 par revue.</p>
+    </div>
+  </div>
+
+  <div class="finding">
+    <div class="f-id">F-05</div>
+    <div class="f-body">
+      <p class="f-title">Pas de vérification de la mnémonique à la création <span class="chip warn">produit</span></p>
+      <p class="f-loc">state.rs · <code>NewWallet { page }</code> → <code>EnterPassphrase</code></p>
+      <p>Le flux affiche les 24 mots sur 4 pages puis passe directement à la passphrase. Aucune étape « retape les mots 7, 13 et 21 ». En pratique, c&rsquo;est la première cause de perte de fonds sur un wallet fait maison : l&rsquo;utilisateur a recopié de travers et ne le découvrira que le jour où il aura besoin de restaurer.</p>
+      <p class="fix"><b>Correctif</b>Réutiliser l&rsquo;écran de restauration existant, avec autocomplétion, pour 3 ou 4 mots tirés au hasard. Le code est déjà là.</p>
+    </div>
+  </div>
+
+  <div class="finding">
+    <div class="f-id">F-06</div>
+    <div class="f-body">
+      <p class="f-title">Le montant des inputs est fourni par l&rsquo;hôte <span class="chip info">à documenter</span></p>
+      <p class="f-loc">psbt.rs · <code>parse_witness_utxo</code></p>
+      <p>Le « Fee : » affiché se calcule à partir de <code>amount_sats</code> venu du witness UTXO, donc d&rsquo;une source non fiable. Ce n&rsquo;est pas exploitable pour voler : Taproot engage le montant dans le sighash, donc un montant menteur produit une signature invalide, pas un vol. Mais c&rsquo;est un déni de service silencieux, et l&rsquo;utilisateur aura vu des frais faux avant de signer. Le mentionner dans la doc du module suffit — il n&rsquo;y a pas de parade offline.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">§4</span><h2>Le modèle de sécurité, qui est le vrai sujet</h2></div>
+
+  <p class="lede">Les défauts ci-dessus se corrigent en une semaine. Celui-ci est structurel : tel qu&rsquo;il est conçu, quelqu&rsquo;un qui repart avec l&rsquo;appareil repart avec les fonds.</p>
+
+  <h3>Le PIN à six chiffres tombe en deux minutes</h3>
+
+  <p>Le commentaire de <code>crypto.rs</code> annonce « quelques jours-CPU » pour un attaquant qui aurait le blob chiffré. C&rsquo;est optimiste d&rsquo;un ordre de grandeur, parce que le calcul est fait pour un CPU alors que personne ne brute-force sur un CPU.</p>
+
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>Grandeur</th><th>Valeur</th><th>D&rsquo;où elle vient</th></tr></thead>
+    <tbody>
+      <tr><td>Espace de recherche</td><td class="mono">10⁶</td><td>PIN de 6 chiffres</td></tr>
+      <tr><td>Compressions SHA-256 par candidat</td><td class="mono">2 × 10⁶</td><td>PBKDF2, 1 M itérations, midstates précalculés</td></tr>
+      <tr><td>Travail total</td><td class="mono">2 × 10¹²</td><td>produit des deux lignes ci-dessus</td></tr>
+      <tr><td>Débit d&rsquo;un GPU haut de gamme</td><td class="mono">≈ 2 × 10¹⁰ /s</td><td>SHA-256 brut, ordre de grandeur hashcat</td></tr>
+      <tr><td><strong>Temps de cassage</strong></td><td class="mono"><strong>≈ 100 s</strong></td><td>une seule carte, une seule cible</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Monter les itérations ne change rien d&rsquo;utile : passer à 10 millions coûte ~80 s de latence à chaque déverrouillage sur le M7 pour amener l&rsquo;attaquant à ~17 minutes. Un PIN court ne peut pas être sauvé par un KDF. Les trois seules issues réelles sont : limiter matériellement les essais, effacer le secret, ou augmenter l&rsquo;entropie du secret.</p>
+
+  <h3>Le lockout ne protège rien</h3>
+
+  <p>Après 3 échecs, <code>PinLocked</code> est définitif — mais <strong>rien n&rsquo;est effacé</strong>. Le blob chiffré est toujours là, sur le disque ou dans la flash. L&rsquo;attaquant qui déclenche le lockout n&rsquo;a pas perdu : il a juste transformé l&rsquo;appareil en brique dont il extrait ensuite le blob pour le casser tranquillement (voir ci-dessus). Le compteur write-ahead, qui est par ailleurs très bien fait, ne défend que contre un attaquant qui accepterait de rester devant l&rsquo;écran tactile.</p>
+
+  <h3>La passphrase BIP39 est neutralisée par le stockage</h3>
+
+  <p>Le seed de 64 octets — passphrase déjà incorporée — est chiffré et stocké, et la passphrase n&rsquo;est jamais redemandée. Elle n&rsquo;ajoute donc <em>aucune</em> résistance face à quelqu&rsquo;un qui a l&rsquo;appareil, et surtout elle perd sa raison d&rsquo;être : le wallet caché et le déni plausible. Or c&rsquo;est justement le levier gratuit qui règle le problème du PIN.</p>
+
+  <div class="callout">
+    <h3>Les trois options, à choisir maintenant plutôt qu&rsquo;après le portage</h3>
+    <p><strong>Ne stocker que l&rsquo;entropie, et redemander la passphrase à chaque déverrouillage.</strong> Coût nul en matériel, le secret redevient aussi fort que ce que l&rsquo;utilisateur tape, et le wallet caché redevient possible. Coût réel : la saisie au clavier virtuel à chaque usage, et un PIN qui ne protège plus que contre le vol d&rsquo;opportunité — ce qui est honnête et devrait être dit à l&rsquo;écran.</p>
+    <p><strong>Effacer après N échecs.</strong> Simple, cohérent avec un backup de 24 mots correctement vérifié (cf. F-05), et ça donne enfin un sens au compteur. À combiner avec un délai croissant entre essais.</p>
+    <p><strong>Ajouter un élément sécurisé.</strong> Un ATECC608B ou équivalent qui ne libère une part de clé qu&rsquo;après présentation du PIN, avec compteur d&rsquo;essais matériel et monotone. C&rsquo;est le modèle Coldcard, c&rsquo;est ~2 € de composant, et c&rsquo;est la seule option qui rend un PIN court réellement défendable. Mais c&rsquo;est une décision de carte, pas de logiciel.</p>
+  </div>
+
+  <p>Le RDP du STM32 ne compte pas comme quatrième option : sa contournabilité par glitching, y compris au niveau 2, est publiée depuis des années. Ne construis rien qui repose dessus.</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">§5</span><h2>Le trou : le canal air-gap n&rsquo;existe pas</h2></div>
+
+  <p class="lede">C&rsquo;est le point qui décide si ce projet devient un objet utilisable ou reste une démo. Quatre choses manquent, et elles s&rsquo;empilent.</p>
+
+  <ul>
+    <li><strong>Aucun décodage de QR, nulle part.</strong> Pas une ligne. Et c&rsquo;est le morceau le plus dur du projet : binarisation d&rsquo;une image de caméra, localisation des motifs de repérage, correction de perspective, Reed-Solomon. En Rust <code>no_std</code> il n&rsquo;existe pas de décodeur mûr — <code>rqrr</code> et <code>quircs</code> veulent <code>alloc</code> ou <code>std</code>. Les options réalistes sont : accepter un allocateur et prendre <code>rqrr</code>, ou faire du FFI vers <a href="https://github.com/dlbeer/quirc">quirc</a> (C, ~1200 lignes, écrit pour l&rsquo;embarqué).</li>
+    <li><strong>La génération de QR est derrière la feature <code>std</code>.</strong> Sur cible, <code>draw_qr</code> tombe sur le placeholder. Donc même l&rsquo;affichage de l&rsquo;adresse de réception ne marche pas encore sur la carte.</li>
+    <li><strong>Pas de QR multi-parties.</strong> Un PSBT au-delà d&rsquo;environ 1 Ko ne tient pas dans un QR lisible par une caméra embarquée. Tous les signers air-gap sérieux (Keystone, Passport, SeedSigner, Sparrow) utilisent <code>ur:crypto-psbt</code> animé, avec encodage fontaine. Sans ça, l&rsquo;appareil ne signera que des transactions jouets — ce que la limite de 384 octets de F-03 rend d&rsquo;ailleurs déjà vrai.</li>
+    <li><strong>Pas d&rsquo;export de xpub ni de descriptor.</strong> C&rsquo;est bloquant et invisible aujourd&rsquo;hui, parce que le simulateur fabrique lui-même le PSBT qu&rsquo;il prétend scanner. Dans la vraie vie, aucun wallet de surveillance ne peut construire une transaction pour toi sans le <code>tr(...)</code> ou le xpub correspondant. La boucle « online → PSBT » n&rsquo;a jamais été bouclée une seule fois.</li>
+  </ul>
+
+  <div class="callout">
+    <h3>La suggestion qui débloque tout : microSD en v1</h3>
+    <p>La carte a un lecteur microSD. Coldcard signe des PSBT par microSD depuis des années, et c&rsquo;est <em>plus</em> sûr qu&rsquo;une caméra : pas de décodeur d&rsquo;image exposé à des données hostiles, pas de limite de taille, pas de QR animé à synchroniser. Tu échanges un parseur d&rsquo;image contre un parseur FAT32 — de l&rsquo;entrée hostile dans les deux cas, mais infiniment mieux balisée d&rsquo;un côté.</p>
+    <p>Ça te donne un signer complet et testable avec Sparrow en quelques jours, au lieu de plusieurs semaines de vision par ordinateur. Le QR reste pour l&rsquo;adresse de réception, en génération seulement — le code existe déjà. Le scan par caméra devient une v2, faite quand le reste marche.</p>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">§6</span><h2>Le portage H747, point par point</h2></div>
+
+  <p class="lede">Sept obstacles concrets. Le premier et le dernier sont ceux qu&rsquo;on sous-estime toujours.</p>
+
+  <h3>1. L&rsquo;écran est en MIPI-DSI, pas en LTDC direct</h3>
+  <p>Le <code>CLAUDE.md</code> dit « LCD-TFT via contrôleur LTDC intégré ». En réalité la chaîne est LTDC → DSI Host → contrôleur de dalle. Le pilote DSI est le morceau le plus pénible du BSP de ST, et il n&rsquo;existe pas en Rust : <code>embassy-stm32</code> n&rsquo;a pas de driver DSI. Tu vas soit l&rsquo;écrire, soit faire du FFI vers le C de ST. Compte ça en semaines, pas en jours.</p>
+
+  <h3>2. Le framebuffer ne rentre pas en RAM interne</h3>
+  <p>800 × 480 × 2 octets = 750 Ko. Le H747 a bien 1 Mo de SRAM, mais <em>fragmentée</em> : AXI 512 Ko, SRAM1-3 288 Ko, DTCM 128 Ko. Aucun bloc contigu ne prend 750 Ko. Il faut donc la SDRAM externe de la carte — et là, conséquence sécurité directe : <strong>le bus SDRAM est sondable au niveau de la carte</strong>. Framebuffer et buffers PSBT peuvent y aller ; seed, PIN et clés dérivées, jamais. Écris-le comme une règle du crate <code>wallet-h747</code> dès le premier commit, parce qu&rsquo;un <code>static mut</code> placé par erreur dans la section SDRAM annulera tout le travail de zeroization.</p>
+
+  <h3>3. La caméra est à trouver, et l&rsquo;OV5640 est un mauvais choix</h3>
+  <p>La carte a un connecteur DCMI 8 bits, mais pas de capteur. Un OV5640 de 5 Mpx est très surdimensionné pour lire un QR — il te faut du 640 × 480 en niveaux de gris — et son initialisation SCCB est une liste de centaines de registres mal documentés. Si tu gardes la caméra, prends un capteur plus modeste et bien documenté.</p>
+
+  <h3>4. Persister 143 octets dans la flash du H747 demande d&rsquo;effacer 128 Ko</h3>
+  <p>Les secteurs du H747 font 128 Ko, l&rsquo;écriture se fait par mots de 256 bits et n&rsquo;est pas réinscriptible sans effacement. Ton blob fait 143 octets, et la garantie « le compteur d&rsquo;échecs ne peut pas être rembobiné » repose entièrement sur cette écriture. Une coupure pendant l&rsquo;effacement détruit le wallet. Il faut un schéma A/B sur deux secteurs, plus un journal append-only pour le compteur d&rsquo;essais. L&rsquo;interface <code>persist(&amp;blob)</code> du core est la bonne abstraction ; c&rsquo;est son implémentation qui est loin d&rsquo;être triviale.</p>
+
+  <h3>5. Le H747 est justement la variante sans accélérateur crypto</h3>
+  <p>Chez ST, ce sont les H755 et H757 qui embarquent CRYP et HASH ; les H745 et H747 ne les ont pas. Ton PBKDF2 à 1 million d&rsquo;itérations tournera donc entièrement en logiciel. Mesuré ici : ~0,7 s par dérivation en release sur un Mac Apple Silicon. Sur un M7 à 480 MHz, compte plutôt <strong>5 à 15 secondes à chaque saisie de PIN</strong>. Deux remèdes immédiats et gratuits : précalculer les midstates ipad/opad du HMAC — le code actuel reconstruit un <code>HmacEngine</code> complet à chaque itération, ce qui double le travail — et revoir le nombre d&rsquo;itérations une fois que la décision du §4 est prise.</p>
+
+  <h3>6. Le dual-core coûte cher et ne rapporte rien</h3>
+  <p>Deux binaires, deux sessions de debug, HSEM, démarrage coordonné, et surtout la cohérence de cache : le M7 a des caches, le M4 non, et tout ce qui est partagé passe par la MPU et des <code>SCB_CleanInvalidateDCache</code> au bon endroit. Le tout pour une frontière de sécurité qui n&rsquo;existe pas — <strong>les deux cœurs voient la même mémoire</strong>. La répartition « M7 = crypto / M4 = UI » du <code>CLAUDE.md</code> ne t&rsquo;achète rien et te coûtera une part significative du temps de portage. Mets tout sur le M7 et laisse le M4 en sommeil.</p>
+
+  <h3>7. Cache D + DMA, la source classique des bugs fantômes</h3>
+  <p>DCMI et LTDC écrivent en DMA dans des buffers que le M7 lit à travers son cache. C&rsquo;est l&rsquo;origine numéro un des « ça marche en debug, pas en release » sur H7. Configure la MPU dès le premier jour, avant d&rsquo;avoir du code à déboguer par-dessus.</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">§7</span><h2>Le choix du matériel</h2></div>
+
+  <p class="lede">Ce sont deux questions différentes, et elles n&rsquo;ont pas la même réponse.</p>
+
+  <h3>Pour prototyper : garde la carte</h3>
+  <p>Écran, tactile capacitif, connecteur DCMI, SDRAM, microSD : tout dans une boîte, sans avoir à faire de PCB. C&rsquo;est un bon banc d&rsquo;essai. Le prix est en complexité logicielle — DSI, dual-core, SDRAM — et il est déjà décrit au §6.</p>
+
+  <h3>Pour une vraie carte : non, et c&rsquo;est l&rsquo;écran qui décide</h3>
+
+  <p>Le H747XI est en TFBGA240 au pas de 0,8 mm : insoudable à la main, PCB 6 à 8 couches, routage SDRAM avec length-matching. C&rsquo;est un projet de PCB à part entière, pas un premier PCB.</p>
+
+  <p>Ce qui force tout ça, c&rsquo;est le choix de l&rsquo;écran 800 × 480. Il impose 750 Ko de framebuffer, donc la SDRAM externe, donc beaucoup de broches, donc le BGA, donc les 6 couches. <strong>Passe à un 320 × 240 ou un 480 × 320 en SPI</strong> — 150 à 300 Ko, ça tient en RAM interne — et tu retombes sur un STM32H743VIT6 en LQFP100, 4 couches, soudable à la main. Toute la pile de complexité s&rsquo;effondre d&rsquo;un coup. Pour afficher une adresse <code>bc1p</code>, un montant et des frais, 320 × 240 est largement suffisant : SeedSigner fait tout en 240 × 240.</p>
+
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>Si tu veux…</th><th>Alors</th><th>Ce que ça change</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Continuer à prototyper vite</td>
+        <td class="mono">H747I-DISCO</td>
+        <td>Rien à acheter. Mono-cœur M7, ignorer le M4.</td>
+      </tr>
+      <tr>
+        <td>Le même MCU mais avec SHA-256 matériel</td>
+        <td class="mono">STM32H757</td>
+        <td>Compatible broche à broche, ajoute CRYP + HASH. Règle le §6.5, pas le §4.</td>
+      </tr>
+      <tr>
+        <td>Une carte que tu peux réellement fabriquer</td>
+        <td class="mono">STM32H743VIT6 + écran SPI</td>
+        <td>LQFP100, 4 couches, pas de SDRAM. Le vrai déblocage.</td>
+      </tr>
+      <tr>
+        <td>Une vraie frontière de sécurité</td>
+        <td class="mono">STM32H573 / STM32U5</td>
+        <td>Cortex-M33 mono-cœur, TrustZone, AES/HASH/PKA, TRNG, secure boot ST. Le M33 te donne la séparation que le M7/M4 ne donne pas.</td>
+      </tr>
+      <tr>
+        <td>Défendre un PIN court</td>
+        <td class="mono">+ ATECC608B</td>
+        <td>Compteur d&rsquo;essais matériel et monotone. Seule réponse réelle au §4.</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Si je devais choisir à ta place : reste sur la DISCO pour finir le logiciel, mais arrête tout de suite d&rsquo;écrire du code qui suppose le dual-core, et prends dès maintenant la décision du §4 — parce qu&rsquo;elle change le schéma de la carte, pas seulement le code.</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">§8</span><h2>Le CLAUDE.md te fabrique de faux souvenirs</h2></div>
+
+  <p>Ce fichier est relu à chaque session par l&rsquo;IA. Quand il est faux, l&rsquo;erreur se propage dans tout ce qui est écrit ensuite. Quatre divergences relevées :</p>
+
+  <ul>
+    <li><code>nokhwa</code> + webcam Mac : absent du <code>Cargo.toml</code> de <code>wallet-sim</code>. Il n&rsquo;y a pas de caméra du tout.</li>
+    <li>« LCD-TFT via contrôleur LTDC intégré » : c&rsquo;est du MIPI-DSI, cf. §6.1.</li>
+    <li>Multi-compte et <code>m/86'/0'/0'/0/n</code> : la dérivation est figée sur l&rsquo;index 0, cf. F-04.</li>
+    <li>« Scale ×2 pour HiDPI » : le code appelle <code>.scale(1)</code>.</li>
+  </ul>
+
+  <p>Corriger ce fichier est probablement l&rsquo;action au meilleur rapport effort / bénéfice de toute cette revue.</p>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">§9</span><h2>Ordre de bataille</h2></div>
+
+  <p class="lede">Trié par ce que ça débloque, pas par difficulté.</p>
+
+  <ol class="steps">
+    <li><b>Décider du modèle de sécurité (§4)</b><span>Passphrase redemandée, effacement après N essais, ou élément sécurisé. Tout le reste en dépend, y compris le schéma de la carte. C&rsquo;est une décision produit, pas technique.</span></li>
+    <li><b>Signet ou testnet, plus l&rsquo;export du descriptor</b><span>Sans les deux, tu ne peux tester avec aucun vrai logiciel. Avec les deux, Sparrow devient ton banc de test et tu découvres immédiatement F-01, F-02 et F-04 sur de vraies transactions.</span></li>
+    <li><b>Corriger F-01 à F-05</b><span>Une semaine environ. F-05 — la vérification de la mnémonique — protège des fonds réels dès aujourd&rsquo;hui.</span></li>
+    <li><b>Choisir le canal d&rsquo;E/S</b><span>MicroSD d&rsquo;abord donne un signer utilisable en quelques jours. Le QR demande un décodeur embarqué plus BC-UR animé : plusieurs semaines, et c&rsquo;est du travail qui ne t&rsquo;apprend rien sur Bitcoin.</span></li>
+    <li><b>Réécrire le CLAUDE.md</b><span>Trente minutes. Arrête la propagation d&rsquo;erreurs dans toutes les sessions suivantes.</span></li>
+    <li><b>Alors seulement, le portage</b><span>Mono-cœur M7. MPU configurée avant tout le reste. Aucun secret en SDRAM. Flash A/B pour la persistance.</span></li>
+  </ol>
+</section>
+
+<footer>
+  Revue effectuée sur le commit 9404a10 · cargo test 83/83 ✓ · cargo clippy -D warnings ✓ · build thumbv7em-none-eabihf vérifié
+</footer>
+
+</div>
+
+</html>
