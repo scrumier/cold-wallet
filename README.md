@@ -3,17 +3,19 @@
 **A Bitcoin signer that never touches the internet.**
 
 An air-gapped Taproot wallet written in Rust. The keys live on a device with no
-Wi-Fi, no Bluetooth, no USB — the only thing that ever crosses the gap is a
-transaction, in and out, as pixels.
+Wi-Fi, no Bluetooth, no USB — a signed transaction is all that ever crosses the
+gap, as a file on a microSD card.
 
 ```
-   HOT SIDE (online)                      COLD SIDE (this wallet)
+   HOT SIDE (Sparrow)                     COLD SIDE (this wallet)
 ┌────────────────────────┐             ┌──────────────────────────────┐
-│ build unsigned PSBT    │    QR in    │  decode → review on screen   │
-│ (Sparrow, custom tool) │ ──────────► │  (amounts, fee, change)      │
+│ import descriptor.txt  │             │ export descriptor (Settings) │
+│ build unsigned PSBT    │  SD folder  │  load *.psbt → review        │
+│ export *.psbt          │ ──────────► │  (amounts, fee, change)      │
 │                        │             │  sign (BIP340 key-path)      │
-│ broadcast signed tx    │ ◄────────── │  emit signed PSBT as QR      │
-└────────────────────────┘    QR out   └──────────────────────────────┘
+│ load *-signed.psbt     │ ◄────────── │  write *-signed.psbt         │
+│ broadcast signed tx    │   SD folder │                              │
+└────────────────────────┘             └──────────────────────────────┘
 
               the private key never leaves the cold side
 ```
@@ -23,23 +25,27 @@ transaction, in and out, as pixels.
 A `no_std` Rust core (`wallet-core/`) holding **everything** — state machine,
 PSBT parsing, derivation, signing, crypto-at-rest, UI — rendered through
 `embedded-graphics` on a generic RGB565 draw target. Today it runs as a desktop
-simulator (`wallet-sim/`, 800×480, SDL2); the intended home is a bare
-STM32H747I-DISCO board, and the core already cross-compiles clean for
-`thumbv7em-none-eabihf` in CI.
+simulator (`wallet-sim/`, 800×480, SDL2) where a local folder plays the
+microSD; the intended home is a bare STM32H747I-DISCO board, and the core
+already cross-compiles clean for `thumbv7em-none-eabihf` in CI.
 
 No framework, no wallet SDK: the PSBT parser, the bech32m encoder, PBKDF2,
-HMAC-SHA256 and the sighash preimage are all written here, bounded and tested.
+HMAC-SHA256, the sighash preimage and the descriptor checksum are all written
+here, bounded and tested.
 
 ## Bitcoin, exactly one flavor
 
-Taproot, key-path only, mainnet. Derivation is pinned to `m/86'/0'/0'/0/0`
-and yields a `bc1p…` address through a hand-written bech32m. Transactions
+Taproot, key-path only, **testnet4** (testnet3 is deprecated). Derivation scans the receive and change
+windows of `m/86'/1'/0'` (index 0..19 each) and yields `tb1p…` addresses
+through a hand-written bech32m (checked against the BIP350 vectors). Transactions
 travel as **BIP174 PSBTs**: the parser accepts at most 5 inputs, 8 outputs and
-2048 bytes, lives entirely on the stack, and allocates nothing.
+4096 bytes, lives entirely on the stack, and allocates nothing. The unsigned
+transaction is preserved byte-for-byte from scan to signature.
 
 Signing is BIP341 key-path: the five hash aggregates, the `H_TapTweak` of the
 internal key, a BIP340 Schnorr signature from `k256` — with touch-derived
-auxiliary randomness, so the same message never signs twice identically.
+auxiliary randomness, so the same message never signs twice identically. Only
+SIGHASH_DEFAULT is signed; explicit sighash types are refused.
 
 ## Trust nothing
 
@@ -47,10 +53,10 @@ The review screen re-derives what the PSBT *claims*:
 
 - the witness UTXO's scriptPubKey **must** be our own P2TR output — a mismatch
   aborts the signature;
-- change is detected by re-deriving the output key ourselves, never by reading
-  a change flag the host could have lied about; unrecognized outputs are shown
-  as plain sends;
-- sighash is refused unless it is `ALL`;
+- change is detected by matching each output against the wallet's own derived
+  output keys across the whole window, never by reading a change flag the host
+  could have lied about; unrecognized outputs are shown as plain sends;
+- sighash types other than SIGHASH_DEFAULT are refused;
 - fees above 25 % of the input sum — or larger than the amount sent — are
   flagged on screen before confirmation.
 
@@ -69,30 +75,33 @@ when they leave scope.
 
 ## Honesty section
 
-This is an educational project. **Not audited. Do not store real funds.**
-What is real and what is still a sketch:
+This is an educational project. **Not audited. Do not store real funds** — the
+build is testnet for that reason.
 
 | Works | Missing |
 |---|---|
-| Sign PSBTs end-to-end (tests re-verify the Schnorr sig) | **QR decode** — the sim injects a synthetic PSBT on click |
-| Seed creation, restore, PIN, lockout, at-rest crypto | Any **hot-side tool** (nothing builds PSBTs or broadcasts yet) |
-| Bounded parser, re-derived change, fee guards | Multi-address (one index; a `/1/0` change shows as a send) |
-| `no_std` + thumbv7em build in CI | Known parser quirks, documented in `REVIEW-2026-08-14.md` |
+| Descriptor export (text + QR, BIP380 checksum) | **QR decode** — the SD folder is the only channel |
+| First real testnet4 transaction signed and **broadcast** end-to-end (bdk-verified) | Wipe after lockout; passphrase re-asked at unlock |
+| SD-folder exchange in the sim (load `*.psbt`, write `*-signed.psbt`) | The hardware port (custom H753 + SPI screen board, not started) |
+| Derivation window (receive + change, index 0..19) | No hot-side tool other than Sparrow (fine) |
+| `no_std` + thumbv7em build in CI | Known limits: host-provided input amounts (F-06), no mnemonic re-check at creation (F-05) |
 
-The roadmap has pivoted: the QR *input* channel is deferred in favor of a
-**microSD** file exchange (read `*.psbt`, write `*-signed.psbt`), plus testnet
-support and a `tr(...)` descriptor export. See `ROADMAP.md`.
+The full review lives in `REVIEW-2026-08-14.md`; the plan, in `ROADMAP.md`.
 
 ## Run it
 
 ```sh
-cargo run -p wallet-sim        # needs SDL2; state persists in ~/.config/cold-wallet
+cargo run -p wallet-sim        # needs SDL2; state in ~/.config/cold-wallet
+                               # SD folder: ~/.config/cold-wallet/sd/
 ```
 
-Welcome → *New wallet* (24 words, touch entropy) → set a PIN → *Sign* → click
-the viewfinder to inject a PSBT → review → confirm → scan the QR back.
+Welcome → *New wallet* (24 words, touch entropy) → set a PIN → *Settings →
+Descriptor* (or the exported `descriptor.txt`) → import it in Sparrow (see
+below) → export a PSBT into the SD folder → *Sign* → pick the file → review →
+confirm → the `*-signed.psbt` lands next to it, ready to load and broadcast in
+Sparrow.
 
-83 tests: `cargo test`, quality gates: `cargo clippy -- -D warnings`.
+99 tests: `cargo test`, quality gates: `cargo clippy -- -D warnings`.
 
 ## Author
 

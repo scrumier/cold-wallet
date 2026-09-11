@@ -1,120 +1,89 @@
 # Roadmap — cold-wallet
 
-**Cadre retenu** (décidé le 14/08/2026) :
-- **Objectif** : portfolio / démo montrable sur vrai matériel. Pas de fonds réels significatifs, donc pas d'élément sécurisé ni de PCB custom.
-- **Sécurité** : wipe après N échecs **et** passphrase redemandée au déverrouillage (le seed n'est plus stocké).
-- **Canal E/S** : microSD d'abord. Caméra et QR animé repoussés hors périmètre v1.
+**Cadre retenu** (décidé le 14/08/2026, mis à jour le 11/09/2026) :
+- **Objectif** : portfolio / démo montrable sur vrai matériel. Pas de fonds réels significatifs, donc pas d'élément sécurisé.
+- **Sécurité** : wipe après N échecs **et** passphrase redemandée au déverrouillage (le seed n'est plus stocké). Pas implémenté — c'est la phase 2.
+- **Canal E/S** : microSD. Implémenté dans le simulateur.
+- **Réseau** : **testnet4** (testnet3 est déprécié).
 
-Estimations en jours-homme à temps plein, à diviser par ta disponibilité réelle.
-
----
-
-## Le point de structure : deux voies parallèles
-
-Le portage matériel touche `wallet-h747` (à créer) et **ne dépend d'aucune** des corrections Bitcoin qui touchent `wallet-core`. Si tu as une échéance de démo, lance la voie B dès que la phase 0 est faite — le bring-up matériel a la plus grosse incertitude, c'est lui qui doit démarrer tôt.
+**État au 11/09/2026** : le jalon phase 3 est **bouclé**. Une vraie transaction testnet4 a été signée par le wallet et diffusée :
 
 ```
-Phase 0 ─┬─ Voie A (wallet-core) : phases 1 → 2 → 3 → 4     ~4 semaines
-         └─ Voie B (wallet-h747) : phase 5                   ~5-8 semaines
-                                        └─ convergence : phase 6
+txid 84c9fb8af8ffe8f237ba56fa07b57cdf64c21ac1f40a0de64313aad3f9e78c2f
+https://mempool.space/testnet4/tx/84c9fb8af8ffe8f237ba56fa07b57cdf64c21ac1f40a0de64313aad3f9e78c2f
 ```
 
-L'ordre à l'intérieur de chaque voie, lui, est contraignant.
+Chaîne validée de bout en bout : descriptor exporté → importé et lu par **bdk-cli** (implémentation indépendante) → adresses dérivées identiques → PSBT construit par bdk → chargé, revu, signé par le simulateur → PSBT signé finalisé par bdk → diffusé. Le jalon a révélé et corrigé un bug d'interopérabilité : `PSBT_IN_TAP_INTERNAL_KEY` est `0x17` (BIP371), pas `0x12`.
 
 ---
 
-## Phase 0 — Assainir la base · ~1 jour
+## Fait (croché, à ne pas casser)
 
-À faire avant tout le reste : c'est ce qui empêche les erreurs de se propager dans chaque session suivante.
+- [x] **Phase 0** — CLAUDE.md réécrit et véridique, limites PSBT alignées (`MAX_PSBT_RAW` 4096, const-asserts).
+- [x] **Phase 1** — F-01 (SIGHASH_DEFAULT seul), F-02 (tx non signée préservée octet pour octet), F-03 (une seule constante dérivée), F-04 (fenêtre de dérivation receive `0/0..19` + change `1/0..19`), F-06 (documenté).
+- [x] **Phase 3** — testnet4 (HRP `tb`, coin `1'`), descriptor BIP386 avec checksum BIP380 (testé contre les vecteurs), canal microSD dans le simulateur (listing, lecture `*.psbt`, écriture `*-signed.psbt`, `descriptor.txt`), **jalon Sparrow bouclé via bdk-cli** (voir ci-dessus).
+- [x] Test d'intégration du parcours complet (création → PIN → persistance → redémarrage KDF → descriptor → signature deux index) — tourné à chaque session, jetable. **À rendre permanent.**
 
-- [ ] **Réécrire `CLAUDE.md`.** Retirer `nokhwa`/webcam (n'existe pas), corriger « LTDC » → MIPI-DSI, retirer la promesse multi-compte et `m/86'/0'/0'/0/n`, corriger « scale ×2 » → `.scale(1)`.
-- [ ] **Y inscrire les deux règles de portage** décidées : mono-cœur M7 (le M4 reste en sommeil), et *aucun secret en SDRAM externe* — seed, PIN, clés dérivées vivent en DTCM uniquement.
-- [ ] **Aligner les limites de taille** (F-03) : une seule constante entre `WalletEvent::PsbtScanned`, `MAX_PSBT_RAW` et `MAX_INPUTS`, avec un `const _: () = assert!(…)` qui casse la compilation si elles divergent. Avec la microSD, tu peux monter franchement (4–8 Ko).
+## Phase 2 — Le modèle de sécurité · ~4 jours · **à faire**
 
----
+- [ ] **Format disque v4 : ne stocker que l'entropie.** Le seed 64 octets disparaît du blob, remplacé par les 32 octets d'entropie. *~1 j*
+- [ ] **Passphrase au déverrouillage.** PIN → passphrase → dérivation du seed en RAM. L'écran `EnterPassphrase` existe déjà. *~1 j*
+- [ ] **Baisser les itérations PBKDF2** (~200 000) une fois la passphrase porteuse d'entropie. *~0,5 j*
+- [ ] **Précalculer les midstates ipad/opad du HMAC** (le code reconstruit un `HmacEngine` complet à chaque itération, ×2 pour rien). *~0,5 j*
+- [ ] **Wipe après 3 échecs.** Écraser le blob, écran d'avertissement au 2ᵉ échec, délai croissant. *~1 j*
 
-# Voie A — Rendre le signer correct et utile
+## Phase 2bis — Les tests manquants · ~1 j · **à faire**
 
-## Phase 1 — Corriger les défauts de signature · ~5 jours
+Identifiés le 11/09 : le compteur (99) est correct, les trous sont ciblés.
 
-Dans cet ordre : F-05 en premier parce que le wipe de la phase 2 en dépend (on n'efface pas un wallet dont le backup n'a jamais été vérifié).
+- [ ] **Test d'intégration permanent** : rendre le parcours complet de bout en bout un test du dépôt (il est refait jetablement à chaque session). Ajouter le flux Restore complet (24 mots → même adresse).
+- [ ] **Vecteurs sighash BIP341 officiels** : les sighash attendus publiés avec le BIP — la preuve bit-exact avec Bitcoin Core.
+- [ ] **Tests de bornes du parser** : 6 inputs refusés, 9 outputs refusés, scriptPubKey 35 o refusé, tx > `MAX_TX_RAW` refusée.
+- [ ] **Mini-fuzz** : mutations déterministes d'un PSBT valide (10 k), aucune panique.
+- [ ] **PSBT "étranger"** riche (derivations BIP32, clés inconnues) : ignoré proprement, signature qui passe.
 
-- [ ] **F-05 · Vérification de la mnémonique à la création.** Après l'affichage des 24 mots, redemander 3 ou 4 mots tirés au hasard. Réutiliser l'écran `RestoreWallet` existant avec son autocomplétion — le gros du code est déjà écrit. *~1 j*
-- [ ] **F-01 · Type de sighash.** Le plus simple et le plus sûr : refuser `sighash_type = Some(1)` au même titre que les autres types non supportés, et ne signer que `None`/`Some(0)`. Si tu veux faire propre, propager le type dans le préimage et émettre 65 octets. *~0,5 j*
-- [ ] **F-02 · Préserver le PSBT d'origine.** Garder le slice brut de `PSBT_GLOBAL_UNSIGNED_TX` (les `tx_start`/`tx_end` sont déjà calculés dans `parse`, il suffit de ne plus les jeter) et le réémettre tel quel. Mieux : conserver le buffer PSBT complet et n'y insérer que les `PSBT_IN_TAP_KEY_SIG`. *~1,5 j*
-- [ ] **F-04 · Fenêtre de dérivation.** Balayer un gap fixe (receive `0/0..20`, change `1/0..20`) pour classer les outputs à la revue **et** pour matcher les inputs à la signature. C'est ce qui empêche l'écran de revue d'afficher ton propre change comme un envoi à un inconnu. *~1,5 j*
-- [ ] **F-06 · Documenter** que les montants d'input viennent de l'hôte et ne sont pas vérifiables offline. *~10 min*
-- [ ] Tests : un PSBT avec change sur `1/0`, un PSBT multi-input sur deux index différents, un PSBT qui déclare `SIGHASH_SINGLE`.
+## Phase 4 — Génération de QR en `no_std` · ~2 jours · **à faire**
 
-## Phase 2 — Le modèle de sécurité · ~4 jours
-
-- [ ] **Format disque v4 : ne stocker que l'entropie.** Le seed 64 octets disparaît du blob, remplacé par les 32 octets d'entropie. Le blob passe de 143 à ~111 octets. *~1 j*
-- [ ] **Passphrase au déverrouillage.** Le flux devient PIN → passphrase → dérivation du seed en RAM. L'écran `EnterPassphrase` existe déjà, il faut le brancher sur le chemin de déverrouillage et pas seulement sur la création. *~1 j*
-- [ ] **Baisser les itérations PBKDF2.** Une fois que la passphrase porte l'entropie, 1 000 000 d'itérations n'ont plus de justification — vise ~200 000 pour rester sous ~2 s sur le M7. *~0,5 j*
-- [ ] **Précalculer les midstates ipad/opad du HMAC.** Le code reconstruit un `HmacEngine` complet à chaque itération, ce qui double le travail pour rien. Gain immédiat de ×2. *~0,5 j*
-- [ ] **Wipe après 3 échecs.** Écraser le blob (zéros, puis effacement du fichier / du secteur), écran d'avertissement explicite dès le 2ᵉ échec, et un délai croissant entre essais. *~1 j*
-
-## Phase 3 — Le canal microSD et le bouclage complet · ~6 jours
-
-C'est la phase qui transforme le projet en objet démontrable.
-
-- [ ] **Signet ou testnet.** Paramétrer le HRP bech32 (`tb`) et le coin type BIP86 (`m/86'/1'/…`). Sans ça tu ne peux tester avec aucun vrai logiciel sans risquer de vrais fonds. *~1 j*
-- [ ] **Export du descriptor.** `tr([<fingerprint>/86h/1h/0h]<xpub>/<0;1>/*)` écrit sur la carte, plus affiché en QR. **C'est le chaînon manquant** : sans lui, aucun wallet de surveillance ne peut construire de PSBT pour toi, et la boucle « online → PSBT » n'a jamais été bouclée une seule fois. *~1,5 j*
-- [ ] **Lecture / écriture de PSBT sur fichier.** Convention simple : lire `*.psbt` à la racine, écrire `<nom>-signed.psbt`. *~1 j*
-- [ ] **Côté simulateur, monter un répertoire local comme fausse carte SD**, avec un écran de sélection de fichier. *~1 j*
-- [ ] 🎯 **Jalon : signer une vraie transaction signet de bout en bout avec Sparrow.** Import du descriptor → construction du PSBT → fichier → signature → fichier → diffusion. C'est le test qui valide rétroactivement les phases 1 à 3, et qui fera apparaître les bugs que les tests unitaires ne voient pas. *~1,5 j*
-
-## Phase 4 — Génération de QR en `no_std` · ~2 jours
-
-- [ ] Le crate `qrcode` est derrière la feature `std` : sur la carte, `draw_qr` tombe aujourd'hui sur le placeholder. Il faut soit un encodeur `no_std` à buffer fixe, soit `embedded-alloc` (mais un allocateur sur un appareil qui ne doit jamais paniquer se paie).
-- [ ] Nécessaire pour afficher l'adresse de réception **et** le descriptor sur le matériel.
+- [ ] Le crate `qrcode` est derrière la feature `std` : sur la carte, `draw_qr` tombe sur le placeholder. Encoder `no_std` à buffer fixe, ou assumer l'écran-only.
 
 ---
 
-# Voie B — Le portage H747
+## Voie B — Le portage matériel · **réorientée le 11/09**
 
-## Phase 5 — `wallet-h747` · ~5 à 8 semaines
+Décision : **abandonner la DISCO** (140 €, écran MIPI-DSI sans driver Rust : 5-15 j de FFI = le long pole, et du travail qui n'apprend rien sur Bitcoin). La carte est **dessinée par nous** :
 
-Ordonné par risque décroissant : le 5.4 est le seul dont l'estimation peut doubler, attaque-le tôt pour le savoir tôt.
+- **MCU : STM32H753VIT6 en LQFP100** — soudable à la main (drag soldering), et il embarque **SHA-256 matériel** : le PBKDF2 du PIN tombe de ~10 s à ~0,2 s sur cible.
+- **Écran : SPI 320×240 RGB565** (ILI9341/ST7735 — drivers Rust existants). Framebuffer 150 Ko : tient en RAM interne, **pas de SDRAM**.
+- **microSD en SPI** (le même canal que le simulateur).
+- **PCB 4 couches** (JLCPCB, ~30 € les 5), secrets en DTCM exclusivement.
+- Tactile : résistif (XPT2046, driver existant) ou boutons physiques mappés sur des zones — à décider au design.
 
-- [ ] **5.1 · Bring-up mono-cœur M7.** `probe-rs` + `defmt`, un blink, la horloge à 480 MHz. Le M4 reste en sommeil. *~2 j*
-- [ ] **5.2 · MPU, caches et carte mémoire.** Configurer avant d'avoir du code à déboguer par-dessus — c'est l'origine numéro un des « ça marche en debug, pas en release ». Définir les sections : framebuffer et buffers PSBT en SDRAM, **secrets en DTCM exclusivement**. *~2 j*
-- [ ] **5.3 · SDRAM externe (FMC).** *~3 j*
-- [ ] **5.4 · Écran MIPI-DSI.** ⚠️ Le long pole. Chaîne LTDC → DSI Host → contrôleur de dalle. `embassy-stm32` n'a pas de driver DSI : soit tu l'écris, soit tu fais du FFI vers le BSP C de ST. **Pour une démo, le FFI est le choix rationnel** — le driver DSI en Rust est un projet en soi et n'ajoute rien à la démonstration. *~5 à 15 j*
-- [ ] **5.5 · Tactile capacitif** (FT5336 en I2C). Simple, et ça débloque le test de toute l'UI. *~1 j*
-- [ ] **5.6 · microSD** (SDMMC + FAT32 via `embedded-sdmmc`). *~4 j*
-- [ ] **5.7 · TRNG** pour l'entropie de création et l'`aux_rand` BIP340. *~0,5 j*
-- [ ] **5.8 · Persistance flash A/B.** Secteurs de 128 Ko, écriture par mots de 256 bits non réinscriptibles : deux secteurs en ping-pong, plus un journal append-only pour le compteur d'essais. Une coupure pendant l'effacement ne doit pas détruire le wallet. *~4 j*
-- [ ] **5.9 · Mesurer le PBKDF2 réel sur cible** et réajuster les itérations pour tenir sous ~2 s. *~0,5 j*
-
----
-
-## Phase 6 — Convergence et finition démo · ~3 jours
-
-- [ ] Faire tourner le flux complet sur la carte : déverrouillage PIN + passphrase → lecture du PSBT sur SD → revue à l'écran → signature → écriture du fichier signé.
-- [ ] Écran « À propos » avec version et hash de commit.
-- [ ] README avec une capture ou une vidéo du flux complet, et une section « limites connues » honnête — c'est ce qui distingue un portfolio crédible d'une démo qui surpromet.
-- [ ] Garder le mainnet derrière un avertissement explicite tant qu'il n'y a pas d'audit.
+- [ ] **B.0 · Dev board en banc d'essai.** WeAct STM32H743 core board (~20 €, déjà soudé) : développer Embassy + écran SPI + SD dessus pendant que le PCB fabrique. *~2 j*
+- [ ] **B.1 · Schéma KiCad + BOM.** Copier les références WeAct/Nucleo (boot, HSE, régulateur), écran SPI + SD + SWD + USB-C + points de test. *~1 semaine d'apprentissage*
+- [ ] **B.2 · Routage 4 couches + fabrication JLCPCB + assemblage** (JLC assembly pour MCU/passifs ; connecteurs à la main). *~2-3 semaines de cycle*
+- [ ] **B.3 · Bring-up** : probe-rs + defmt, blink, horloge. *~1 j*
+- [ ] **B.4 · Écran SPI + microSD + TRNG** sur la carte custom. *~2 j*
+- [ ] **B.5 · Persistance flash A/B** (secteurs, journal append-only pour le compteur d'échecs). *~4 j*
+- [ ] **B.6 · Mesurer le PBKDF2 réel (avec accélérateur) et ajuster les itérations.** *~0,5 j*
+- [ ] **B.7 · Re-layout de l'UI** : 800×480 → 320×240 (le draw est générique, c'est du layout). *~1-2 j*
 
 ---
 
 ## Hors périmètre, assumé
 
-Décidé, pas oublié — à écrire tel quel dans le README :
-
 | Écarté | Pourquoi |
 |---|---|
-| Caméra + décodage QR | Plusieurs semaines de vision par ordinateur qui n'apprennent rien sur Bitcoin. La microSD fait le même travail. |
+| Caméra + décodage QR | Semaines de vision par ordinateur qui n'apprennent rien sur Bitcoin. La microSD fait le travail. |
 | QR animé BC-UR | Sans scan caméra, sans objet. |
-| Dual-core M7 + M4 | Coût de complexité réel, frontière de sécurité nulle : les deux cœurs voient la même mémoire. |
-| Élément sécurisé (ATECC608B) | Implique une carte custom. Hors périmètre pour un portfolio. |
-| PCB custom | Idem. Si tu y viens un jour : écran SPI 320×240 → plus de SDRAM → STM32H743VIT6 en LQFP100, 4 couches, soudable à la main. |
-| Multi-compte | La fenêtre de dérivation de F-04 couvre le besoin réel. Retirer le bouton mort « Comptes » ou le griser. |
+| Dual-core M7 + M4 | Coût de complexité, frontière de sécurité nulle. |
+| Élément sécurisé (ATECC608B) | Aucun intérêt sans fonds réels : le wallet n'est pas utilisé avec de la vraie valeur. Revenir au moment où ça change. |
+| Testnet3 | Déprécié partout. Testnet4. |
+| STM32H747I-DISCO | 140 € + le long pole DSI. Remplacée par la carte custom H753 + SPI (voir voie B). |
 
 ---
 
 ## Cette semaine
 
-1. Phase 0 en entier (~1 j).
-2. F-05, la vérification de mnémonique (~1 j) — c'est ce qui protège des fonds dès aujourd'hui.
-3. Commander ce qu'il manque pour la voie B et faire le 5.1 (~2 j), pour découvrir tôt les surprises de toolchain.
+1. Phase 2 (modèle de sécurité) — c'est ce qui transforme la démo en wallet défendable. F-05 (vérification de la mnémonique) d'abord : on n'efface jamais un wallet dont le backup n'a pas été vérifié.
+2. Phase 2bis (tests manquants) — une journée, elle verrouille tout le reste.
+3. Commander le dev board + écran SPI + microSD, et commencer B.0.
