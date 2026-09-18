@@ -281,11 +281,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // released before the loop body, allowing `window.update()` inside.
         #[allow(clippy::needless_collect)]
         let events: Vec<_> = window.events().collect();
+        // Set when a click redraws the screen: the other clicks of this batch
+        // were aimed at the screen we just left. The drain at the end of the
+        // arm covers the ones still in SDL's queue.
+        let mut swallowed = false;
         for event in events {
             match event {
                 SimulatorEvent::Quit => break 'running,
                 SimulatorEvent::MouseButtonUp { mouse_btn: MouseButton::Left, point } => {
+                    if swallowed { continue; }
                     let before = wallet.get_state();
+                    // Whether this click changed what is on screen.
+                    let mut screen_redrawn = false;
 
                     // Persist closure: receives the wallet's current on-disk image
                     // every time the wallet needs to be written (write-ahead before
@@ -369,6 +376,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if before != after {
                         draw_ui(&mut display, &wallet, &sd_list.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+                        screen_redrawn = true;
                     }
 
                     // Two-phase resolution: if the input parked us in a
@@ -390,12 +398,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("[WALLET] Wallet saved (encrypted) to {}", wallet_path().display());
                             }
                             draw_ui(&mut display, &wallet, &sd_list.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+                            screen_redrawn = true;
                         }
                     }
 
                     // Redraw when entering SignScan (file listing appeared).
                     if matches!(after, AppState::SignScan) && !matches!(before, AppState::SignScan) {
                         draw_ui(&mut display, &wallet, &sd_list.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+                        screen_redrawn = true;
+                    }
+
+                    // A click just swapped the screen, so every other click was
+                    // aimed at the one we left. The PIN pad sits on top of the
+                    // Home grid: the tap that validates the 6th digit falls on
+                    // the SignScan button (keys 3-4), Receive (keys 0-1) or
+                    // Settings (keys 8-9). A user who clicks twice, impatient
+                    // during the ~1.5 s PBKDF2 pass, would otherwise land on
+                    // SignScan right after unlocking. Drop what SDL still holds
+                    // and ignore the rest of this batch.
+                    if screen_redrawn {
+                        for ev in window.events() {
+                            if matches!(ev, SimulatorEvent::Quit) { break 'running; }
+                        }
+                        swallowed = true;
                     }
                 }
                 _ => {}

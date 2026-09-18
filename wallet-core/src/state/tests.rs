@@ -123,6 +123,31 @@ fn pin_key_position_grid() {
     assert_eq!(pin_key_pos(9), (PIN_ROW_X + 4 * PIN_KEY_STEP, PIN_ROW1_Y));
 }
 
+/// Where a tap aimed at a PIN key would land if it were handled from Home.
+/// `None` means it falls in a gap between the Home buttons.
+fn home_hit_from_pin_key(pos: usize) -> Option<AppState> {
+    let (kx, ky) = pin_key_pos(pos);
+    let (event, _) = create_touch_event_with_entropy(
+        kx + PIN_KEY_W / 2, ky + PIN_KEY_H / 2, 3,
+    );
+    let (state, ..) = step(AppState::Home, event, None);
+    (state != AppState::Home).then_some(state)
+}
+
+#[test]
+fn pin_pad_keys_sit_on_top_of_the_home_grid() {
+    // Both grids are centred on the same 800×480 screen, so the PIN pad and the
+    // Home buttons share pixels. This is why `wallet-sim` swallows the clicks
+    // queued behind a screen change: the tap that validates the 6th digit is
+    // also a tap on a Home button, and a second click during the ~1.5 s PBKDF2
+    // pass would otherwise open SignScan straight after unlocking.
+    // Pinning the geometry here: removing the overlap should be a decision.
+    assert_eq!(home_hit_from_pin_key(0), Some(AppState::Receive));
+    assert_eq!(home_hit_from_pin_key(3), Some(AppState::SignScan));
+    assert_eq!(home_hit_from_pin_key(5), Some(AppState::Accounts));
+    assert_eq!(home_hit_from_pin_key(9), Some(AppState::Settings));
+}
+
 #[test]
 fn pin_digit_lookup() {
     let order = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0];

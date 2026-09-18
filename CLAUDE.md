@@ -118,6 +118,8 @@ Three crates in the workspace:
 
   `handle_event` est le seul endroit qui décide de leur ordre, et cet ordre est une règle de sécurité : le compteur d'échecs part sur le disque avant toute vérification du PIN. Ne pas le déplacer.
 - **`wallet-sim`** — Desktop simulator (`std`, SDL2), fenêtre 800×480 RGB565 (`.scale(1)`, pas de scaling HiDPI). Persistance réelle : `~/.config/cold-wallet/wallet.bin`, écriture atomique (tmp → fsync → rename → fsync dir). Fausse microSD : `~/.config/cold-wallet/sd/` (listing SignScan, `*-signed.psbt`, `descriptor.txt`). Entropie : `getrandom`. Pas de webcam.
+
+  **Un clic qui change d'écran avale les clics en attente.** Les deux grilles sont centrées sur le même écran, donc le pavé PIN recouvre les boutons de Home (voir `pin_pad_keys_sit_on_top_of_the_home_grid`) : le tap qui valide le 6e chiffre tombe aussi sur SignScan, Receive, Accounts ou Settings. Sans ce filtre, un second clic pendant la passe PBKDF2 ouvre cet écran juste après le déverrouillage. `wallet-h747` doit faire de même : le FT5336 met les touches en file d'attente comme SDL.
 - **`wallet-h747`** *(à créer)* — bare-metal M7. Le portage = remplacer ce seul crate.
 
 **Règle de portage :** tout ce qui est hardware-dépendant (stockage, écran, tactile, timer, RNG) vit dans `wallet-sim` ou `wallet-h747`. `wallet-core` ne contient aucune dépendance plateforme.
