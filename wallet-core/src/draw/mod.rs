@@ -120,20 +120,6 @@ pub(crate) fn fmt_u8(n: u8, buf: &mut [u8; 4]) -> &str {
     core::str::from_utf8(&buf[pos..]).unwrap_or("?")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::fmt_u8;
-
-    #[test]
-    fn formats_numbers() {
-        let mut buf = [0u8; 4];
-        assert_eq!(fmt_u8(0, &mut buf), "0");
-        assert_eq!(fmt_u8(7, &mut buf), "7");
-        assert_eq!(fmt_u8(42, &mut buf), "42");
-        assert_eq!(fmt_u8(255, &mut buf), "255");
-    }
-}
-
 // ── QR rendering (generation only — the qrcode crate needs std) ──────────────
 // On the bare-metal target these fall back to a placeholder until phase 4
 // of the roadmap (a no_std encoder).
@@ -227,4 +213,18 @@ where
         .draw(display)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fmt_u8;
+
+    #[test]
+    fn formats_numbers() {
+        let mut buf = [0u8; 4];
+        assert_eq!(fmt_u8(0, &mut buf), "0");
+        assert_eq!(fmt_u8(7, &mut buf), "7");
+        assert_eq!(fmt_u8(42, &mut buf), "42");
+        assert_eq!(fmt_u8(255, &mut buf), "255");
+    }
 }

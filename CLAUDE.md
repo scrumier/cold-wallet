@@ -107,7 +107,16 @@ Import *-signed.psbt, broadcast ◀ Write *-signed.psbt to SD folder
 
 Three crates in the workspace:
 
-- **`wallet-core`** — `#![no_std]` library. Machine à états `ColdWallet` (`state.rs`), toute la logique Bitcoin (`psbt.rs`, `signing.rs`, `sighash.rs`, `derive.rs`), la crypto at-rest (`crypto.rs`, `storage.rs`), et `draw_ui` générique sur `DrawTarget<Color=Rgb565>`. Zéro connaissance hardware : la persistance est injectée par closure `persist(&blob)`, l'entropie arrive dans les événements.
+- **`wallet-core`** — `#![no_std]` library. Machine à états `ColdWallet` (`state.rs` + `state/`), toute la logique Bitcoin (`psbt.rs`, `signing.rs`, `sighash.rs`, `derive.rs`), la crypto at-rest (`crypto.rs`, `storage.rs`), et `draw_ui` générique sur `DrawTarget<Color=Rgb565>`. Zéro connaissance hardware : la persistance est injectée par closure `persist(&blob)`, l'entropie arrive dans les événements.
+
+  `state.rs` porte les types, la struct, `handle_event`, `Drop` et `Default`. Le détail vit à côté :
+  - `state/machine.rs` — le dispatch `step_*` (un tap → un état suivant), aucun effet de bord
+  - `state/security.rs` — PIN, compteur d'échecs, PBKDF2, AEAD, verrouillage
+  - `state/wallet.rs` — dérivation (adresse, fenêtre de clés, descriptor), chargement PSBT, signature
+  - `state/mnemonic.rs` — saisie BIP39 et bande de suggestions
+  - `state/tests.rs` — les tests de la machine à états
+
+  `handle_event` est le seul endroit qui décide de leur ordre, et cet ordre est une règle de sécurité : le compteur d'échecs part sur le disque avant toute vérification du PIN. Ne pas le déplacer.
 - **`wallet-sim`** — Desktop simulator (`std`, SDL2), fenêtre 800×480 RGB565 (`.scale(1)`, pas de scaling HiDPI). Persistance réelle : `~/.config/cold-wallet/wallet.bin`, écriture atomique (tmp → fsync → rename → fsync dir). Fausse microSD : `~/.config/cold-wallet/sd/` (listing SignScan, `*-signed.psbt`, `descriptor.txt`). Entropie : `getrandom`. Pas de webcam.
 - **`wallet-h747`** *(à créer)* — bare-metal M7. Le portage = remplacer ce seul crate.
 
@@ -120,4 +129,4 @@ Three crates in the workspace:
 - `REVIEW-2026-08-14.md` — la revue complète : défauts F-01 à F-06, modèle de sécurité, portage, matériel. Le code n'a pas changé depuis : tout y est encore exact.
 - `ROADMAP.md` — le plan décidé (cadre, phases, hors-périmètre assumé). Suivre cet ordre ; ne pas ouvrir une phase hors séquence sans raison.
 
-When adding UI states: add a variant to `AppState` in `wallet-core/src/state.rs` and a match arm in `draw_ui`. Keep all crypto and wallet logic inside `wallet-core`.
+When adding UI states: add a variant to `AppState` in `wallet-core/src/state.rs` and a match arm in `draw_ui`. Keep all crypto and wallet logic inside `wallet-core`. A new `step_*` goes in `state/machine.rs`; anything that touches the PIN or the on-disk blob goes in `state/security.rs`.

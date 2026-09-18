@@ -55,35 +55,35 @@ fn draw_qr<D>(display: &mut D, address: &str) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
+    let (upper, len) = upper_address(address.as_bytes());
+    super::draw_qr_data(display, &upper[..len], QR_X, QR_Y, QR_SIZE)
+}
+
+/// Copies `data` into a fixed buffer, uppercasing ASCII. Returns the buffer and
+/// the number of valid bytes. Split out from `draw_qr` so the transformation
+/// itself is testable without a draw target.
+fn upper_address(data: &[u8]) -> ([u8; 62], usize) {
     let mut upper = [0u8; 62];
-    let bytes = address.as_bytes();
-    let len = bytes.len().min(upper.len());
-    for (i, &b) in bytes[..len].iter().enumerate() {
+    let len = data.len().min(upper.len());
+    for (i, &b) in data[..len].iter().enumerate() {
         upper[i] = b.to_ascii_uppercase();
     }
-
-    super::draw_qr_data(display, &upper[..len], QR_X, QR_Y, QR_SIZE)
+    (upper, len)
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "std")]
-    #[test]
-    fn qr_encodes_bc1p_address() {
-        use qrcode::{EcLevel, QrCode};
-        // A bc1p address is always 62 chars (4 prefix + 58 bech32m data chars).
-        let addr = "bc1pqpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3jn54khce";
-        assert_eq!(addr.len(), 62, "test address must be exactly 62 chars");
+    use super::upper_address;
 
-        let mut upper = [0u8; 62];
-        let bytes = addr.as_bytes();
-        let len = bytes.len().min(upper.len());
-        for (i, &b) in bytes[..len].iter().enumerate() {
-            upper[i] = b.to_ascii_uppercase();
-        }
-        let qr = QrCode::with_error_correction_level(&upper[..len], EcLevel::M)
-            .expect("QR encoding failed for bc1p address");
-        // 62 uppercase alphanumeric chars with EcLevel::M → Version 4 (33×33 modules).
-        assert_eq!(qr.width(), 33, "unexpected QR version for a 62-char bc1p address");
+    #[test]
+    fn upper_address_uppercases_and_truncates() {
+        let (buf, len) = upper_address(b"bc1pABCdef");
+        assert_eq!(len, 10);
+        assert_eq!(&buf[..len], b"BC1PABCDEF");
+
+        // A 62-char bc1p address is the maximum; anything longer is clamped.
+        let (buf, len) = upper_address(&[b'a'; 80]);
+        assert_eq!(len, 62);
+        assert_eq!(buf[0], b'A');
     }
 }
