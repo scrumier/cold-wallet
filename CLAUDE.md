@@ -51,7 +51,7 @@ Import *-signed.psbt, broadcast ◀ Write *-signed.psbt to SD folder
 - Mnémonique 24 mots + passphrase → seed ; PIN 6 chiffres ; blob v3 chiffré ChaCha20-Poly1305, clé = PBKDF2-HMAC-SHA256 (1M itérations, écrit à la main, testé contre RFC 4231/7914), version+salt liés en AAD.
 - Compteur d'échecs PIN écrit **avant** vérification (write-ahead + fsync), comparaison constant-time, secrets effacés en `write_volatile` + `Drop`.
 - **Décidé mais pas encore implémenté** (roadmap phase 2) : ne stocker que l'entropie, redemander la passphrase au déverrouillage, wipe après N échecs. Aujourd'hui le seed complet (passphrase incorporée) est stocké et la passphrase n'est jamais redemandée.
-- Défauts connus et non corrigés : **F-05** (aucune vérification de mnémonique à la création) et **F-06** (montants d'input fournis par l'hôte, à documenter) dans `REVIEW-2026-08-14.md`. F-01 à F-04 sont corrigés (fenêtre de dérivation, sighash type, PSBT préservé, limites alignées).
+- Défauts de `REVIEW-2026-08-14.md` encore ouverts : **F-05** (aucune vérification de mnémonique à la création), et la moitié de **F-02** qui reste — la tx non signée est réémise octet pour octet, mais les champs PSBT inconnus sont toujours jetés au ré-encodage. **F-06** n'est pas un défaut ouvert mais une limite documentée, en tête de `psbt.rs`. F-01, F-03 et F-04 sont corrigés par `630f27e`.
 
 ## UX & input
 
@@ -128,7 +128,7 @@ Three crates in the workspace:
 
 ## Documents de pilotage
 
-- `REVIEW-2026-08-14.md` — la revue complète : défauts F-01 à F-06, modèle de sécurité, portage, matériel. Le code n'a pas changé depuis : tout y est encore exact.
+- `REVIEW-2026-08-14.md` — la revue complète : défauts F-01 à F-06, modèle de sécurité, portage, matériel. Elle décrit le commit `9404a10` : sur les défauts, F-01, F-03 et F-04 ont été corrigés depuis par `630f27e`, et F-02 l'est à moitié. Le reste (modèle de sécurité, portage, matériel) n'a pas bougé.
 - `ROADMAP.md` — le plan décidé (cadre, phases, hors-périmètre assumé). Suivre cet ordre ; ne pas ouvrir une phase hors séquence sans raison.
 
 When adding UI states: add a variant to `AppState` in `wallet-core/src/state.rs` and a match arm in `draw_ui`. Keep all crypto and wallet logic inside `wallet-core`. A new `step_*` goes in `state/machine.rs`; anything that touches the PIN or the on-disk blob goes in `state/security.rs`.
